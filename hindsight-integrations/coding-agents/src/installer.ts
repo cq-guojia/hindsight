@@ -1861,6 +1861,57 @@ const zcode: HarnessInstaller = {
   },
 };
 
+/**
+ * WorkBuddy (Tencent's AI workbench) keeps its user config at `~/.workbuddy/settings.json` and reads
+ * hooks from a `hooks` block there — the nested Claude-shaped registration its shared @genie/agent-cli
+ * engine uses throughout, so `mergeHarnessHooks` writes it unchanged. Unlike claude-code its MCP
+ * server is a plain FILE (`~/.workbuddy/mcp.json`, the same shape cursor/antigravity use), so no
+ * external CLI is involved. The companion skill lands in WorkBuddy's own root (see SKILL_DIRS).
+ */
+const workbuddy: HarnessInstaller = {
+  name: "workbuddy",
+  detect: (c) => existsSync(join(c.home, ".workbuddy")),
+  install(c) {
+    const settingsPath = join(c.home, ".workbuddy", "settings.json");
+    const settings = readJson(settingsPath);
+    settings.hooks = settings.hooks ?? {};
+    mergeHarnessHooks(settings.hooks, "workbuddy", c.dist);
+    writeJson(settingsPath, settings);
+    c.log?.(`workbuddy: hooks merged into ${settingsPath}`);
+
+    const mcpPath = join(c.home, ".workbuddy", "mcp.json");
+    const mcp = readJson(mcpPath);
+    mcp.mcpServers = mcp.mcpServers ?? {};
+    mcp.mcpServers.hindsight = mcpServerEntry(c.dist, "workbuddy");
+    writeJson(mcpPath, mcp);
+    c.log?.(`workbuddy: MCP server registered in ${mcpPath}`);
+
+    installSkill(c, "workbuddy");
+  },
+  uninstall(c) {
+    const settingsPath = join(c.home, ".workbuddy", "settings.json");
+    if (existsSync(settingsPath)) {
+      const settings = readJson(settingsPath);
+      if (settings.hooks) {
+        stripHarnessHooks(settings.hooks, "workbuddy");
+        if (!Object.keys(settings.hooks).length) delete settings.hooks;
+        writeJson(settingsPath, settings);
+      }
+    }
+    const mcpPath = join(c.home, ".workbuddy", "mcp.json");
+    if (existsSync(mcpPath)) {
+      const mcp = readJson(mcpPath);
+      if (isOurMcpEntry(mcp.mcpServers?.hindsight)) {
+        delete mcp.mcpServers.hindsight;
+        if (!Object.keys(mcp.mcpServers).length) delete mcp.mcpServers;
+        writeJson(mcpPath, mcp);
+      }
+    }
+    uninstallSkill(c, "workbuddy");
+    c.log?.("workbuddy: hooks + MCP registration + skill removed");
+  },
+};
+
 export const INSTALLERS: HarnessInstaller[] = [
   opencode,
   opencode2,
@@ -1880,6 +1931,7 @@ export const INSTALLERS: HarnessInstaller[] = [
   dsh,
   factoryDroid,
   zcode,
+  workbuddy,
 ];
 
 // The public executable was renamed from Gemini CLI to Antigravity's `agy`. Keep the

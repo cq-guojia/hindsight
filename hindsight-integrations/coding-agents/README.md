@@ -2,7 +2,7 @@
 
 Long-term project memory for **coding agents**, backed by [Hindsight](https://vectorize.io/hindsight).
 One package, several agents: a shared reflect-and-inject core with a thin entry point per agent
-(**Claude Code**, **Codex CLI**, **DeepAgents Dcode**, **opencode**, **opencode 2**, **Kilo CLI**, **Cursor CLI**, **GitHub Copilot CLI**, **Grok Build**, **Qwen Code**, **Factory Droid**, **ZCode**, **Antigravity CLI**, **Devin CLI**, **Cline CLI**, **pi**, **Prime Agent**, **DeepSeek Harness**). Ingestion is fully
+(**Claude Code**, **Codex CLI**, **DeepAgents Dcode**, **opencode**, **opencode 2**, **Kilo CLI**, **Cursor CLI**, **GitHub Copilot CLI**, **Grok Build**, **Qwen Code**, **Factory Droid**, **ZCode**, **Antigravity CLI**, **Devin CLI**, **Cline CLI**, **pi**, **Prime Agent**, **DeepSeek Harness**, **WorkBuddy**). Ingestion is fully
 automatic — there is no setup command: a repo's git history and conversations flow into its memory
 bank in the background as you work.
 
@@ -262,6 +262,18 @@ channel, so the seed line goes to the plugin log rather than the UI. Everything 
 recalled memory, the knowledge preamble, the `hindsight_*` tools — is unaffected. If you prefer the
 published-package route, `dsh plugin --profile web add @vectorize-io/hindsight-coding-agents` works
 too: the package ships the profile patch layer, so nothing else needs editing.
+
+#### <img src="https://hindsight.vectorize.io/img/harness/workbuddy.svg" alt="" width="20" height="20" /> WorkBuddy
+
+```bash
+npx @vectorize-io/hindsight-coding-agents install workbuddy
+```
+
+3 hooks in `~/.workbuddy/settings.json`, the stdio MCP server in `~/.workbuddy/mcp.json`, and the
+companion skill in `~/.workbuddy/skills`. WorkBuddy (Tencent's AI workbench) is built on the shared
+`@genie/agent-cli` engine, so its hook protocol is Claude Code's field for field — only the
+transcript schema differs (`type:"message"` records carrying top-level `role`/`content`), which the
+package's own reader normalizes.
 
 Uninstall the same way: `npx @vectorize-io/hindsight-coding-agents uninstall claude-code` (or `uninstall all`).
 

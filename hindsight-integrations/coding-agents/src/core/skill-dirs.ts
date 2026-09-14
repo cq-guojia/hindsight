@@ -35,4 +35,6 @@ export const SKILL_DIRS: Record<string, string[]> = {
   // and dsh's copy with it.
   pi: [".pi", "agent", "skills"],
   "prime-agent": [".prime", "agent", "skills"],
+  // WorkBuddy's own user-level skills root (the @genie/agent-cli engine reads ~/.workbuddy).
+  workbuddy: [".workbuddy", "skills"],
 };
