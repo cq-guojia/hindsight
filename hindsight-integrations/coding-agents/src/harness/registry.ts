@@ -73,6 +73,9 @@ export const HARNESS_NAMES = [
   // TraeCode is a per-prompt HOOK host registered in ~/.trae-cn/hooks.json (see src/installer.ts).
   "traecode",
   "kimi-code",
+  // WorkBuddy is a per-prompt HOOK host too: the installer wires ~/.workbuddy/settings.json and
+  // the stdio MCP registration in ~/.workbuddy/mcp.json (see src/installer.ts).
+  "workbuddy",
 ];
 
 const HOOK_BINS: Record<string, string> = {
@@ -89,6 +92,7 @@ const HOOK_BINS: Record<string, string> = {
   zcode: "hindsight-zcode-hook",
   traecode: "hindsight-traecode-hook",
   "kimi-code": "hindsight-kimi-hook",
+  workbuddy: "hindsight-workbuddy-hook",
   // more hook harnesses: add a HookSpec entry point (see src/cursor-hook.ts) + a registration here.
 };
 
