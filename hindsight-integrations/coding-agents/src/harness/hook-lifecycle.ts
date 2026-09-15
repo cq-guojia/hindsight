@@ -18,6 +18,7 @@ import { readQwenTranscript } from "../core/transcript-qwen";
 import { readDroidTranscript } from "../core/transcript-droid";
 import { zcodeAssistantText } from "../core/transcript-zcode";
 import { readWorkbuddyTranscript } from "../core/transcript-workbuddy";
+import { readCodebuddyTranscript } from "../core/transcript-codebuddy-ide";
 
 export type HookHarnessName =
   | "claude-code"
@@ -595,11 +596,13 @@ export const HOOK_HARNESSES: Record<HookHarnessName, HookHarnessSpec> = {
     },
   },
   /**
-   * CodeBuddy Code — the same `@genie/agent-cli` engine WorkBuddy ships, running under its own
-   * product config (`~/.codebuddy`; WorkBuddy only overrides `dataFolderName`). Hook names, payload
-   * shape and the on-disk transcript schema are therefore identical, so this spec differs from
-   * `workbuddy` only in the files the installer writes and the harness name stamped on what it
-   * retains — the transcript READER is shared (core/transcript-workbuddy.ts).
+   * CodeBuddy — the same `@genie/agent-cli` engine WorkBuddy ships, running under its own product
+   * config (`~/.codebuddy`; WorkBuddy only overrides `dataFolderName`). Hook names and payload shape
+   * are identical, so this spec differs from `workbuddy` in the files the installer writes, the
+   * harness name stamped on what it retains — and ONE thing more: CodeBuddy ships in two hosts whose
+   * transcripts do NOT look alike. CodeBuddy Code (the CLI) writes the WorkBuddy JSONL, while the
+   * IDE hands the Stop hook its own `<conversation>/index.json` directory layout. So the reader is
+   * a dispatcher on the shape it was handed (core/transcript-codebuddy-ide.ts).
    */
   codebuddy: {
     configStyle: "nested",
@@ -618,7 +621,7 @@ export const HOOK_HARNESSES: Record<HookHarnessName, HookHarnessSpec> = {
         transcriptPath: ev.transcript_path as string | undefined,
         cwd: ev.cwd as string | undefined,
       }),
-      readTranscript: readWorkbuddyTranscript,
+      readTranscript: readCodebuddyTranscript,
     },
   },
 };
