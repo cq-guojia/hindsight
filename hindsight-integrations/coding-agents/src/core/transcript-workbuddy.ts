@@ -68,11 +68,14 @@ function messageText(content: WorkbuddyLine["content"]): string {
  *
  * Measured over 21 local transcripts / 334 user records: 284 are exactly a `<user_query>`, 3 carry
  * the image tail, and no other shape appears.
+ *
+ * Exported for the CodeBuddy IDE reader: this wrapper belongs to the ENGINE, so both of its hosts
+ * spell it the same way (core/transcript-codebuddy-ide.ts).
  */
 const USER_QUERY_RE =
   /^\s*<user_query>([\s\S]*?)<\/user_query>\s*(?:<image_local_path>[\s\S]*?<\/image_local_path>\s*)?$/;
 
-function unwrapUserQuery(text: string): string {
+export function unwrapUserQuery(text: string): string {
   const match = USER_QUERY_RE.exec(text);
   return (match ? match[1] : text).trim();
 }
@@ -81,8 +84,10 @@ function unwrapUserQuery(text: string): string {
  * Records WorkBuddy writes as `role:"user"` that the human did NOT say: the context-compaction
  * summaries (written when the window fills, and a summary of turns ALREADY retained) and
  * background-task notices. Prefix-based, like transcript-codex.ts's `isSyntheticUserText`.
+ *
+ * Exported for the CodeBuddy IDE reader, whose own store carries the same `<cb_summary>` marker.
  */
-function isSyntheticUserText(text: string): boolean {
+export function isSyntheticUserText(text: string): boolean {
   const s = text.trimStart();
   return (
     s.startsWith("<cb_summary>") ||
