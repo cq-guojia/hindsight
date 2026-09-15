@@ -340,7 +340,7 @@ too: the package ships the profile patch layer, so nothing else needs editing. E
 companion skill — a plugin wired by the host's own plugin manager installs it itself on the first
 session, since that route never runs our installer.
 
-#### <img src="/img/harness/workbuddy.svg" alt="" width="20" height="20" /> WorkBuddy
+#### <img src="/img/harness/workbuddy.png" alt="" width="20" height="20" /> WorkBuddy
 
 ```bash
 npx @vectorize-io/hindsight-coding-agents install workbuddy
@@ -352,7 +352,7 @@ companion skill in `~/.workbuddy/skills`. WorkBuddy (Tencent's AI workbench) is 
 transcript schema differs (`type:"message"` records carrying top-level `role`/`content`), which the
 package's own reader normalizes.
 
-#### <img src="/img/harness/codebuddy.svg" alt="" width="20" height="20" /> CodeBuddy
+#### <img src="/img/harness/codebuddy.png" alt="" width="20" height="20" /> CodeBuddy
 
 ```bash
 npx @vectorize-io/hindsight-coding-agents install codebuddy
