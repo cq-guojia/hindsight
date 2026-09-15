@@ -31,7 +31,8 @@ export type HookHarnessName =
   | "qwen-code"
   | "factory-droid"
   | "zcode"
-  | "workbuddy";
+  | "workbuddy"
+  | "codebuddy";
 export type HookLifecycle = "sessionStart" | "prompt" | "stop";
 /**
  * How the HOST spells one hook registration.
@@ -585,6 +586,33 @@ export const HOOK_HARNESSES: Record<HookHarnessName, HookHarnessSpec> = {
     retain: {
       hostTimeoutSec: 60,
       harness: "workbuddy",
+      parse: (ev) => ({
+        sessionId: ev.session_id as string | undefined,
+        transcriptPath: ev.transcript_path as string | undefined,
+        cwd: ev.cwd as string | undefined,
+      }),
+      readTranscript: readWorkbuddyTranscript,
+    },
+  },
+  /**
+   * CodeBuddy Code — the same `@genie/agent-cli` engine WorkBuddy ships, running under its own
+   * product config (`~/.codebuddy`; WorkBuddy only overrides `dataFolderName`). Hook names, payload
+   * shape and the on-disk transcript schema are therefore identical, so this spec differs from
+   * `workbuddy` only in the files the installer writes and the harness name stamped on what it
+   * retains — the transcript READER is shared (core/transcript-workbuddy.ts).
+   */
+  codebuddy: {
+    configStyle: "nested",
+    install: {
+      sessionStart: { event: "SessionStart", entry: "codebuddy-sessionstart-hook.js", timeout: 30 },
+      prompt: { event: "UserPromptSubmit", entry: "codebuddy-hook.js", timeout: 30 },
+      stop: { event: "Stop", entry: "codebuddy-stop-hook.js", timeout: 60 },
+    },
+    sessionStart: standardSessionStart("codebuddy"),
+    prompt: { ...claudePrompt, harness: "codebuddy" },
+    retain: {
+      hostTimeoutSec: 60,
+      harness: "codebuddy",
       parse: (ev) => ({
         sessionId: ev.session_id as string | undefined,
         transcriptPath: ev.transcript_path as string | undefined,

@@ -2,7 +2,7 @@
 
 Long-term project memory for **coding agents**, backed by [Hindsight](https://vectorize.io/hindsight).
 One package, several agents: a shared reflect-and-inject core with a thin entry point per agent
-(**Claude Code**, **Codex CLI**, **DeepAgents Dcode**, **opencode**, **opencode 2**, **Kilo CLI**, **Cursor CLI**, **GitHub Copilot CLI**, **Grok Build**, **Qwen Code**, **Factory Droid**, **ZCode**, **Antigravity CLI**, **Devin CLI**, **Cline CLI**, **pi**, **Prime Agent**, **DeepSeek Harness**, **WorkBuddy**). Ingestion is fully
+(**Claude Code**, **Codex CLI**, **DeepAgents Dcode**, **opencode**, **opencode 2**, **Kilo CLI**, **Cursor CLI**, **GitHub Copilot CLI**, **Grok Build**, **Qwen Code**, **Factory Droid**, **ZCode**, **Antigravity CLI**, **Devin CLI**, **Cline CLI**, **pi**, **Prime Agent**, **DeepSeek Harness**, **WorkBuddy**, **CodeBuddy**). Ingestion is fully
 automatic — there is no setup command: a repo's git history and conversations flow into its memory
 bank in the background as you work.
 
@@ -274,6 +274,17 @@ companion skill in `~/.workbuddy/skills`. WorkBuddy (Tencent's AI workbench) is 
 `@genie/agent-cli` engine, so its hook protocol is Claude Code's field for field — only the
 transcript schema differs (`type:"message"` records carrying top-level `role`/`content`), which the
 package's own reader normalizes.
+
+#### <img src="https://hindsight.vectorize.io/img/harness/codebuddy.svg" alt="" width="20" height="20" /> CodeBuddy
+
+```bash
+npx @vectorize-io/hindsight-coding-agents install codebuddy
+```
+
+3 hooks in `~/.codebuddy/settings.json`, the stdio MCP server in `~/.codebuddy/mcp.json`, and the
+companion skill in `~/.codebuddy/skills`. CodeBuddy Code runs the same `@genie/agent-cli` engine as
+WorkBuddy — WorkBuddy merely ships it with `dataFolderName: ".workbuddy"` — so it reuses WorkBuddy's
+hook runtime and transcript reader, and differs only in the root it writes to.
 
 Uninstall the same way: `npx @vectorize-io/hindsight-coding-agents uninstall claude-code` (or `uninstall all`).
 
