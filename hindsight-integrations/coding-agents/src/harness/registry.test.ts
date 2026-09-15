@@ -30,9 +30,10 @@ describe("HARNESS_NAMES", () => {
         "traecode",
         "kimi-code",
         "workbuddy",
+        "codebuddy",
       ])
     );
-    expect(HARNESS_NAMES).toHaveLength(21);
+    expect(HARNESS_NAMES).toHaveLength(22);
   });
 
   // Family guard: a new harness that lands without a Docker E2E setup is never driven through its
@@ -45,7 +46,8 @@ describe("HARNESS_NAMES", () => {
     // container could drive; its hook wire is covered by journal-harnesses.test.ts instead.
     // WorkBuddy ships inside Tencent's WorkBuddy desktop IDE — same story as TraeCode: no
     // documented headless mode a container could drive, so only its journal wire is exercised.
-    const exempt = new Set(["antigravity-cli", "traecode", "workbuddy"]);
+    // CodeBuddy Code (the CLI edition) shares WorkBuddy's engine and journal wire.
+    const exempt = new Set(["antigravity-cli", "traecode", "workbuddy", "codebuddy"]);
     const root = fileURLToPath(new URL("../..", import.meta.url));
     const setups = new Set(ALL_HARNESS_SETUPS.map((setup) => setup.name));
     for (const name of HARNESS_NAMES.filter((n) => !exempt.has(n))) {
