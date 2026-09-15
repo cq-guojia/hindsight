@@ -291,11 +291,11 @@ hook runtime, and differs only in the root it writes to.
 
 **Both CodeBuddy hosts are covered, and they do not store sessions alike.** CodeBuddy Code (the CLI)
 writes the WorkBuddy JSONL that the shared reader parses. The IDE hands the Stop hook its own
-per-conversation directory — `<…>/CodeBuddyExtension/Data/<uid>/CodeBuddyIDE/<uid>/history/
-<md5(workspace)>/<conversationId>/`, whose `index.json` *is* the `transcript_path` and whose prose
-sits one level down in `messages/<messageId>.json` — so the reader dispatches on the shape it was
-handed (core/transcript-codebuddy-ide.ts). Without that, an IDE session read as an empty transcript
-and was quietly never written back.
+per-conversation directory instead — `CodeBuddyIDE/<uid>/history/<md5(workspace)>/<conversationId>/`,
+whose `index.json` _is_ the `transcript_path` and whose prose sits one level down, in
+`messages/<messageId>.json` — so the reader dispatches on the shape it was handed
+(core/transcript-codebuddy-ide.ts). Without that, an IDE session read as an empty transcript and was
+quietly never written back.
 
 Uninstall the same way: `npx @vectorize-io/hindsight-coding-agents uninstall claude-code` (or `uninstall all`).
 
