@@ -520,7 +520,7 @@ if TYPE_CHECKING:
     from .prompt_preview import PromptPreview
     from .retain.attachment_content import LoadedAttachment, RetainAttachment
     from .retain.attachment_store import StoredAttachment
-    from .transfer import BankImportResult, ImportResult
+    from .transfer import BankImportResult, ImportResult, TransferScope
     from .vector_index_health import CoverageTrigger
 
 
@@ -2682,6 +2682,18 @@ class MemoryEngine(MemoryEngineInterface):
             webhook_manager=None,
         )
 
+        # One context for every extension the engine owns. The tenant extension and the
+        # operation validator are constructed BEFORE the engine and handed to __init__, so
+        # load_extension() never got to set a context on them -- without this, a validator
+        # hook reaching context.get_memory_engine() raises "Extension context not set".
+        # Safe to share: the context holds only process-global handles (db url, engine,
+        # webhook manager) and no per-request state. getattr rather than a bare call
+        # because tests hand in duck-typed extensions that are not Extension subclasses.
+        for _ext in (self._tenant_extension, self._operation_validator):
+            _set_context = getattr(_ext, "set_context", None)
+            if _set_context is not None:
+                _set_context(self._ext_ctx)
+
         loaded = load_extension("MEMORY_DEFENSE", MemoryDefenseExtension, context=self._ext_ctx)
         if loaded is not None:
             self._memory_defense: MemoryDefenseExtension = loaded
@@ -2921,6 +2933,139 @@ class MemoryEngine(MemoryEngineInterface):
                     json.dumps(result, default=_json_default),
                     uuid.UUID(operation_id),
                 )
+
+    async def _handle_export_bank(self, task_dict: dict[str, Any]):
+        """Handler for async whole-bank export tasks.
+
+        Same shape as ``_handle_export_documents`` — build the archive off the
+        request path, stash it in file storage, record the download handle on the
+        operation — but the archive is scoped (see :class:`TransferScope`) and can
+        carry the bank's config and history as well as its memories.
+        """
+        import json
+
+        from .memories import get_memories
+        from .transfer import TransferScope, export_bank
+
+        bank_id = task_dict.get("bank_id")
+        operation_id = task_dict.get("operation_id")
+        if not bank_id:
+            raise ValueError("bank_id is required for export_bank task")
+        scope = TransferScope(
+            data=task_dict.get("include_data", True),
+            bank_config=task_dict.get("include_bank_config", True),
+            history=task_dict.get("include_history", False),
+        )
+
+        backend = await self._get_backend()
+        # One connection for the whole export: a bank is read across a dozen
+        # queries, and a transaction is what makes them one point in time rather
+        # than a smear of whatever was being written meanwhile.
+        async with acquire_with_retry(backend) as conn:
+            async with conn.transaction():
+                archive_bytes = await export_bank(
+                    conn,
+                    bank_id,
+                    scope=scope,
+                    memories=get_memories(),
+                    file_storage=self._file_storage,
+                )
+
+        storage_key = f"banks/{bank_id}/exports/{uuid.uuid4()}/transfer.zip"
+        await self._file_storage.store(
+            file_data=archive_bytes,
+            key=storage_key,
+            metadata={"content_type": "application/zip", "bank_id": bank_id},
+        )
+        download_url = await self._file_storage.get_download_url(storage_key)
+
+        if operation_id:
+            result = {
+                "storage_key": storage_key,
+                "download_url": download_url,
+                "byte_size": len(archive_bytes),
+                "filename": f"{bank_id}-bank.zip",
+            }
+            async with acquire_with_retry(backend) as conn:
+                await conn.execute(
+                    f"UPDATE {fq_table('async_operations')} "
+                    f"SET result_metadata = COALESCE(result_metadata, '{{}}'::jsonb) || $1::jsonb "
+                    f"WHERE operation_id = $2",
+                    json.dumps(result, default=_json_default),
+                    uuid.UUID(operation_id),
+                )
+
+    async def _handle_import_bank(self, task_dict: dict[str, Any]):
+        """Handler for async whole-bank import tasks.
+
+        Retrieves the stashed archive, restores it into the target bank, records
+        the counts on the operation, and deletes the archive. The operation is
+        recorded against the *source* bank of the request: the target does not
+        exist yet, and ``async_operations`` is keyed by a bank that does.
+        """
+        import json
+
+        from .transfer import TransferScope
+
+        storage_key = task_dict.get("storage_key")
+        target_bank_id = task_dict.get("target_bank_id")
+        operation_id = task_dict.get("operation_id")
+        if not storage_key or not target_bank_id:
+            raise ValueError("storage_key and target_bank_id are required for import_bank task")
+
+        from hindsight_api.models import RequestContext
+
+        context = RequestContext(
+            internal=True,
+            user_initiated=True,
+            tenant_id=task_dict.get("_tenant_id"),
+            api_key_id=task_dict.get("_api_key_id"),
+            retry_count=task_dict.get("_retry_count", 0),
+        )
+
+        archive_bytes = await self._file_storage.retrieve(storage_key)
+        result = await self.import_bank_async(
+            archive_bytes,
+            context,
+            target_bank_id=target_bank_id,
+            scope=TransferScope(
+                data=task_dict.get("include_data", True),
+                bank_config=task_dict.get("include_bank_config", True),
+                history=task_dict.get("include_history", False),
+            ),
+        )
+
+        if operation_id:
+            counts = {
+                "target_bank_id": result.bank_id,
+                "documents_imported": result.documents_imported,
+                "facts_imported": result.facts_imported,
+                "observations_imported": result.observations_imported,
+                "attachments_imported": result.attachments_imported,
+                "operations_imported": result.operations_imported,
+                "maintenance_queue_rows_imported": result.maintenance_queue_rows_imported,
+                "invalidated_memories_imported": result.invalidated_memories_imported,
+                "mental_models_imported": result.mental_models_imported,
+                "mental_model_history_imported": result.mental_model_history_imported,
+                "knowledge_pages_imported": result.knowledge_pages_imported,
+                "directives_imported": result.directives_imported,
+                "webhooks_imported": result.webhooks_imported,
+                "history_rows_imported": result.history_rows_imported,
+            }
+            backend = await self._get_backend()
+            async with acquire_with_retry(backend) as conn:
+                await conn.execute(
+                    f"UPDATE {fq_table('async_operations')} "
+                    f"SET result_metadata = COALESCE(result_metadata, '{{}}'::jsonb) || $1::jsonb "
+                    f"WHERE operation_id = $2",
+                    json.dumps(counts, default=_json_default),
+                    uuid.UUID(operation_id),
+                )
+
+        try:
+            await self._file_storage.delete(storage_key)
+        except Exception:
+            logger.warning("Failed to delete bank import archive %s", storage_key, exc_info=True)
 
     async def _delete_operation_export_archive(self, result_metadata: Any) -> None:
         """Best-effort delete of an export operation's stored archive.
@@ -3669,6 +3814,10 @@ class MemoryEngine(MemoryEngineInterface):
                     await self._handle_import_documents(task_dict)
                 elif task_type == "export_documents":
                     await self._handle_export_documents(task_dict)
+                elif task_type == "export_bank":
+                    await self._handle_export_bank(task_dict)
+                elif task_type == "import_bank":
+                    await self._handle_import_bank(task_dict)
                 elif task_type == "consolidation":
                     consolidation_result = await self._handle_consolidation(task_dict)
                 elif task_type == "graph_maintenance":
@@ -6577,6 +6726,112 @@ class MemoryEngine(MemoryEngineInterface):
             task_payload=task_payload,
         )
 
+    async def submit_bank_export_async(
+        self,
+        bank_id: str,
+        request_context: "RequestContext",
+        *,
+        scope: "TransferScope | None" = None,
+    ) -> dict[str, Any]:
+        """Submit an async whole-bank export and return its ``operation_id``.
+
+        The archive carries whatever ``scope`` asks for — see
+        :class:`~hindsight_api.engine.transfer.TransferScope` for what each of its
+        three booleans maps to. Runs in a worker for the same reason the document
+        export does (#3321): building the archive loads the bank into memory and
+        compresses it, which must not happen on the request path.
+        """
+        from .transfer import TransferScope
+
+        scope = scope or TransferScope()
+        await self._authenticate_tenant(request_context)
+        await self._get_backend()
+
+        task_payload: dict[str, Any] = {
+            "include_data": scope.data,
+            "include_bank_config": scope.bank_config,
+            "include_history": scope.history,
+        }
+        if request_context.tenant_id:
+            task_payload["_tenant_id"] = request_context.tenant_id
+        if request_context.api_key_id:
+            task_payload["_api_key_id"] = request_context.api_key_id
+
+        return await self._submit_async_operation(
+            bank_id,
+            operation_type="export_bank",
+            task_type="export_bank",
+            task_payload=task_payload,
+        )
+
+    async def submit_bank_import_async(
+        self,
+        bank_id: str,
+        archive_bytes: bytes,
+        request_context: "RequestContext",
+        *,
+        target_bank_id: str | None = None,
+        scope: "TransferScope | None" = None,
+    ) -> dict[str, Any]:
+        """Submit an async whole-bank restore and return its ``operation_id``.
+
+        ``bank_id`` is the bank the operation is *recorded against* (it must
+        exist — ``async_operations`` has a foreign key to ``banks``), and
+        ``target_bank_id`` is the bank being restored, which must NOT exist: a
+        bank restore is not a merge. Both checks run here so the caller gets an
+        immediate error rather than a task that fails in the background.
+        """
+        from .transfer import TransferScope
+        from .transfer.importer import parse_bank_archive
+
+        scope = scope or TransferScope()
+        # Validate the archive synchronously: a malformed or documents-only zip is
+        # a caller error (400), not a background failure.
+        parsed = parse_bank_archive(archive_bytes)
+        target = target_bank_id or parsed.manifest.source_bank_id
+
+        await self._authenticate_tenant(request_context)
+        backend = await self._get_backend()
+        if await bank_utils.get_bank_profile_if_exists(backend, target) is not None:
+            raise ValueError(
+                f"Target bank '{target}' already exists; a bank restore writes into a fresh bank "
+                f"(it is not a merge). Delete it first, or choose a different target bank id."
+            )
+        if self._operation_validator:
+            from hindsight_api.extensions import CreateBankContext
+
+            await self._validate_operation(
+                self._operation_validator.validate_create_bank(
+                    CreateBankContext(bank_id=target, request_context=request_context)
+                )
+            )
+
+        storage_key = f"banks/{bank_id}/imports/{uuid.uuid4()}/transfer.zip"
+        await self._file_storage.store(
+            file_data=archive_bytes,
+            key=storage_key,
+            metadata={"content_type": "application/zip", "bank_id": bank_id},
+        )
+
+        task_payload: dict[str, Any] = {
+            "storage_key": storage_key,
+            "target_bank_id": target,
+            "include_data": scope.data,
+            "include_bank_config": scope.bank_config,
+            "include_history": scope.history,
+        }
+        if request_context.tenant_id:
+            task_payload["_tenant_id"] = request_context.tenant_id
+        if request_context.api_key_id:
+            task_payload["_api_key_id"] = request_context.api_key_id
+
+        return await self._submit_async_operation(
+            bank_id,
+            operation_type="import_bank",
+            task_type="import_bank",
+            task_payload=task_payload,
+        )
+
     async def retrieve_bank_file(
         self,
         bank_id: str,
@@ -7192,7 +7447,7 @@ class MemoryEngine(MemoryEngineInterface):
         request_context: "RequestContext",
         *,
         target_bank_id: str | None = None,
-        include_history: bool = False,
+        scope: "TransferScope | None" = None,
     ) -> "BankImportResult":
         """Restore a whole bank from an :func:`transfer.export_bank` archive.
 
@@ -7200,6 +7455,7 @@ class MemoryEngine(MemoryEngineInterface):
         indexes; restores bank config, mental models, directives and webhooks as
         exported (no consolidation/webhooks — a migration restores exact state). The
         target bank must not already exist (import restores a whole bank, not a merge).
+        ``scope`` narrows what is restored to a subset of what the archive carries.
         """
         from .transfer import import_bank
         from .transfer.importer import parse_bank_archive
@@ -7236,7 +7492,10 @@ class MemoryEngine(MemoryEngineInterface):
             format_date_fn=self._format_readable_date,
             archive_bytes=archive_bytes,
             target_bank_id=target_bank_id,
-            include_history=include_history,
+            scope=scope,
+            # Attachment bytes ride in the archive; the target writes them to its
+            # own storage under its own keys (see transfer._restore_attachments).
+            file_storage=self._file_storage,
         )
 
     async def import_documents_async(
@@ -16616,26 +16875,11 @@ class MemoryEngine(MemoryEngineInterface):
 
         # Run reflect with the source query, excluding the mental model being refreshed
         # Skip creating a nested "hindsight.reflect" span since we already have "hindsight.mental_model_refresh"
-        # Build context to guide the reflect agent: tell it what this mental
-        # model is about so it stays on-topic and produces high-quality content.
         mm_name = mental_model.get("name") or mental_model_id
-        refresh_context = (
-            f'You are writing a document called "{mm_name}". '
-            f"ONLY include content that directly answers the topic query. "
-            f"Discard observations that are tangential or off-topic — retrieval may return "
-            f"loosely related content that does not belong in this document.\n\n"
-            f"Quality guidelines:\n"
-            f"- Preserve concrete examples, before/after pairs, and sample sentences "
-            f"from the observations. These teach more than abstract rules.\n"
-            f"- If observations contain illustrative examples (e.g. ✅/❌ pairs, "
-            f"rewrites, sample phrases), include them in your answer.\n"
-            f"- Structure the document around the topic, not around the sources."
-        )
 
         reflect_kwargs: dict[str, Any] = dict(
             bank_id=bank_id,
             query=source_query,
-            context=refresh_context,
             request_context=request_context,
             tags=tag_filtering.tags,
             tags_match=tag_filtering.tags_match,
@@ -16677,6 +16921,11 @@ class MemoryEngine(MemoryEngineInterface):
                 else:
                     created_after = seen_at_raw
                 reflect_kwargs["created_after"] = created_after
+        # Tell the reflect agent what this page is about, and — full vs delta — how to
+        # treat time: see build_mental_model_refresh_context.
+        from .reflect.prompts import build_mental_model_refresh_context
+
+        reflect_kwargs["context"] = build_mental_model_refresh_context(mm_name, delta=created_after is not None)
 
         window = MentalModelRefreshWindow(
             created_after=created_after,
