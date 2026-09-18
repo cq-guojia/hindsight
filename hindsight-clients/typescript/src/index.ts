@@ -679,6 +679,15 @@ export class HindsightClient {
       state?: "valid" | "invalidated";
       documentId?: string;
       entityId?: string;
+      /**
+       * Time axis to filter and order by. Also drops memories with no value on
+       * that column, so `total` counts only the ones inside the window.
+       */
+      timeField?: "created_at" | "updated_at" | "mentioned_at" | "occurred_start" | "occurred_end";
+      /** ISO-8601, inclusive. */
+      startDate?: string;
+      /** ISO-8601, exclusive. */
+      endDate?: string;
       signal?: AbortSignal;
     }
   ): Promise<ListMemoryUnitsResponse> {
@@ -694,6 +703,9 @@ export class HindsightClient {
         state: options?.state,
         document_id: options?.documentId,
         entity_id: options?.entityId,
+        time_field: options?.timeField,
+        start_date: options?.startDate,
+        end_date: options?.endDate,
       },
       signal: options?.signal,
     });
@@ -887,13 +899,6 @@ export class HindsightClient {
       retainStrategies?: Record<string, unknown>;
       /** Number of chunks per sub-batch in chunks extraction mode. */
       retainChunkBatchSize?: number;
-      /**
-       * Let a fact leave when/where/who/why empty instead of writing "N/A". Off by
-       * default; worth enabling for a small self-hosted model under strict structured
-       * output, where a fact with no date of its own still has to emit some string and
-       * tends to borrow one the text stated about another subject.
-       */
-      retainOptionalFactDimensions?: boolean;
       /** Persist the original document text alongside extracted facts. */
       storeDocumentText?: boolean;
       /** Cap on observations retained per scope (-1 for unlimited). */
@@ -991,8 +996,6 @@ export class HindsightClient {
       updates.retain_strategies = options.retainStrategies;
     if (options.retainChunkBatchSize !== undefined)
       updates.retain_chunk_batch_size = options.retainChunkBatchSize;
-    if (options.retainOptionalFactDimensions !== undefined)
-      updates.retain_optional_fact_dimensions = options.retainOptionalFactDimensions;
     if (options.storeDocumentText !== undefined)
       updates.store_document_text = options.storeDocumentText;
     if (options.maxObservationsPerScope !== undefined)
@@ -1640,12 +1643,28 @@ export class HindsightClient {
    */
   async listDocuments(
     bankId: string,
-    options?: { limit?: number; offset?: number; signal?: AbortSignal }
+    options?: {
+      limit?: number;
+      offset?: number;
+      /** Time axis to filter and order by; `updated_at` is the default ordering. */
+      timeField?: "created_at" | "updated_at";
+      /** ISO-8601, inclusive. */
+      startDate?: string;
+      /** ISO-8601, exclusive. */
+      endDate?: string;
+      signal?: AbortSignal;
+    }
   ): Promise<ListDocumentsResponse> {
     const response = await sdk.listDocuments({
       client: this.client,
       path: { bank_id: bankId },
-      query: { limit: options?.limit, offset: options?.offset },
+      query: {
+        limit: options?.limit,
+        offset: options?.offset,
+        time_field: options?.timeField,
+        start_date: options?.startDate,
+        end_date: options?.endDate,
+      },
       signal: options?.signal,
     });
 
