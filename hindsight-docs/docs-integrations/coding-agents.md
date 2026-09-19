@@ -288,10 +288,12 @@ package's own reader normalizes.
 npx @vectorize-io/hindsight-coding-agents install codebuddy
 ```
 
-3 hooks in `~/.codebuddy/settings.json`, the stdio MCP server in `~/.codebuddy/mcp.json`, and the
-companion skill in `~/.codebuddy/skills`. CodeBuddy Code runs the same `@genie/agent-cli` engine as
-WorkBuddy — WorkBuddy merely ships it with `dataFolderName: ".workbuddy"` — so it reuses WorkBuddy's
-hook runtime, and differs only in the root it writes to.
+3 hooks in `~/.codebuddy/settings.json`, the stdio MCP server in `~/.codebuddy/.mcp.json` — the
+recommended file: the installer follows CodeBuddy's documented fallback chain, merging into an
+existing deprecated `~/.codebuddy/mcp.json` or legacy `~/.codebuddy.json` rather than shadowing it —
+and the companion skill in `~/.codebuddy/skills`. CodeBuddy Code runs the same `@genie/agent-cli`
+engine as WorkBuddy — WorkBuddy merely ships it with `dataFolderName: ".workbuddy"` — so it reuses
+WorkBuddy's hook runtime, and differs only in the root it writes to.
 
 **Both CodeBuddy hosts are covered, and they do not store sessions alike.** CodeBuddy Code (the CLI)
 writes the WorkBuddy JSONL that the shared reader parses. The IDE hands the Stop hook its own

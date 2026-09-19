@@ -1871,7 +1871,8 @@ const zcode: HarnessInstaller = {
  * hooks from a `hooks` block there — the nested Claude-shaped registration its shared @genie/agent-cli
  * engine uses throughout, so `mergeHarnessHooks` writes it unchanged. Unlike claude-code its MCP
  * server is a plain FILE (`~/.workbuddy/mcp.json`, the same shape cursor/antigravity use), so no
- * external CLI is involved. The companion skill lands in WorkBuddy's own root (see SKILL_DIRS).
+ * external CLI is involved — and unlike CodeBuddy there is no documented priority chain, so the
+ * path is fixed. The companion skill lands in WorkBuddy's own root (see SKILL_DIRS).
  */
 const workbuddy: HarnessInstaller = {
   name: "workbuddy",
@@ -1920,10 +1921,27 @@ const workbuddy: HarnessInstaller = {
 /**
  * CodeBuddy Code keeps its user config at `~/.codebuddy/settings.json` — the SAME @genie/agent-cli
  * engine WorkBuddy ships, whose only difference is `dataFolderName: ".workbuddy"` in its
- * product.json, so this installer is WorkBuddy's one root apart: the nested hooks block, a plain
- * `mcp.json` FILE (no external CLI involved), and the companion skill in CodeBuddy's own root (see
- * SKILL_DIRS). The hooks themselves share WorkBuddy's runtime and transcript reader.
+ * product.json, so this installer is WorkBuddy's one root apart: the nested hooks block, an MCP
+ * FILE (no external CLI involved), and the companion skill in CodeBuddy's own root (see
+ * SKILL_DIRS). The MCP file follows CodeBuddy's documented priority chain (see codebuddyMcpPath):
+ * the recommended ~/.codebuddy/.mcp.json unless an older location already exists. The hooks
+ * themselves share WorkBuddy's runtime and transcript reader.
  */
+// CodeBuddy resolves its user-scope MCP file by priority — ~/.codebuddy/.mcp.json (recommended),
+// then ~/.codebuddy/mcp.json (deprecated), then ~/.codebuddy.json (legacy) — reading and writing
+// the FIRST one that exists, creating the recommended path only when none do
+// (codebuddy.ai/docs/cli/mcp). Mirroring that rule matters: writing the recommended path
+// unconditionally would shadow a user whose servers live in the deprecated file — CodeBuddy would
+// read only our fresh file and drop every server they had.
+const codebuddyMcpPaths = (home: string): string[] => [
+  join(home, ".codebuddy", ".mcp.json"),
+  join(home, ".codebuddy", "mcp.json"),
+  join(home, ".codebuddy.json"),
+];
+
+const codebuddyMcpPath = (home: string): string =>
+  codebuddyMcpPaths(home).find((p) => existsSync(p)) ?? codebuddyMcpPaths(home)[0];
+
 const codebuddy: HarnessInstaller = {
   name: "codebuddy",
   detect: (c) => existsSync(join(c.home, ".codebuddy")),
@@ -1935,7 +1953,7 @@ const codebuddy: HarnessInstaller = {
     writeJson(settingsPath, settings);
     c.log?.(`codebuddy: hooks merged into ${settingsPath}`);
 
-    const mcpPath = join(c.home, ".codebuddy", "mcp.json");
+    const mcpPath = codebuddyMcpPath(c.home);
     const mcp = readJson(mcpPath);
     mcp.mcpServers = mcp.mcpServers ?? {};
     mcp.mcpServers.hindsight = mcpServerEntry(c.dist, "codebuddy");
@@ -1954,8 +1972,10 @@ const codebuddy: HarnessInstaller = {
         writeJson(settingsPath, settings);
       }
     }
-    const mcpPath = join(c.home, ".codebuddy", "mcp.json");
-    if (existsSync(mcpPath)) {
+    // Sweep every link of the chain: an entry installed before a newer file appeared would
+    // otherwise survive as a dormant duplicate once CodeBuddy starts reading a higher-priority one.
+    for (const mcpPath of codebuddyMcpPaths(c.home)) {
+      if (!existsSync(mcpPath)) continue;
       const mcp = readJson(mcpPath);
       if (isOurMcpEntry(mcp.mcpServers?.hindsight)) {
         delete mcp.mcpServers.hindsight;

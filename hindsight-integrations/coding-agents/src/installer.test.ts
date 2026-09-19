@@ -646,7 +646,9 @@ describe("workbuddy installer", () => {
 
 describe("codebuddy installer", () => {
   const settingsPath = (ctx: InstallCtx) => join(ctx.home, ".codebuddy", "settings.json");
-  const mcpPath = (ctx: InstallCtx) => join(ctx.home, ".codebuddy", "mcp.json");
+  const mcpPath = (ctx: InstallCtx) => join(ctx.home, ".codebuddy", ".mcp.json"); // recommended
+  const deprecatedMcpPath = (ctx: InstallCtx) => join(ctx.home, ".codebuddy", "mcp.json");
+  const legacyMcpPath = (ctx: InstallCtx) => join(ctx.home, ".codebuddy.json");
 
   it("registers the three hooks in ~/.codebuddy/settings.json, in Claude's nested shape", () => {
     const ctx = makeCtx();
@@ -665,12 +667,39 @@ describe("codebuddy installer", () => {
     expect(entry("Stop").timeout).toBe(60);
   });
 
-  it("registers the stdio MCP server in ~/.codebuddy/mcp.json, tagged with the codebuddy harness", () => {
+  it("registers the stdio MCP server in ~/.codebuddy/.mcp.json, tagged with the codebuddy harness", () => {
     const ctx = makeCtx();
     expect(run(["install", "codebuddy"], ctx)).toBe(0);
     const server = readJson(mcpPath(ctx)).mcpServers.hindsight;
     expect(server).toMatchObject({ command: "node", env: { HINDSIGHT_MCP_HARNESS: "codebuddy" } });
     expect(server.args[0]).toContain("mcp-server.js");
+    // Fresh home: the recommended file is created, no older link of the chain appears.
+    expect(existsSync(deprecatedMcpPath(ctx))).toBe(false);
+    expect(existsSync(legacyMcpPath(ctx))).toBe(false);
+  });
+
+  // CodeBuddy reads the FIRST existing file of its chain, so creating the recommended file when a
+  // deprecated one already exists would shadow the user's servers. Mirror the host's write rule.
+  it("merges into an existing deprecated ~/.codebuddy/mcp.json instead of shadowing it", () => {
+    const ctx = makeCtx();
+    writeJsonAt(deprecatedMcpPath(ctx), {
+      mcpServers: { affine: { command: "npx", args: ["-y", "affine-mcp-server"] } },
+    });
+    expect(run(["install", "codebuddy"], ctx)).toBe(0);
+    expect(existsSync(mcpPath(ctx))).toBe(false);
+    const servers = readJson(deprecatedMcpPath(ctx)).mcpServers;
+    expect(servers.affine).toBeDefined();
+    expect(servers.hindsight).toBeDefined();
+  });
+
+  it("falls through to the legacy ~/.codebuddy.json when it is the only file present", () => {
+    const ctx = makeCtx();
+    writeJsonAt(legacyMcpPath(ctx), { mcpServers: { affine: { command: "npx" } }, projects: {} });
+    expect(run(["install", "codebuddy"], ctx)).toBe(0);
+    const cfg = readJson(legacyMcpPath(ctx));
+    expect(cfg.mcpServers.hindsight).toBeDefined();
+    expect(cfg.projects).toEqual({});
+    expect(existsSync(mcpPath(ctx))).toBe(false);
   });
 
   it("preserves the rest of the settings and any foreign hooks", () => {
@@ -707,13 +736,31 @@ describe("codebuddy installer", () => {
 
   it("uninstall removes our hooks and MCP entry, keeping a foreign server", () => {
     const ctx = makeCtx();
-    writeJsonAt(mcpPath(ctx), { mcpServers: { affine: { command: "npx" } } });
+    writeJsonAt(deprecatedMcpPath(ctx), { mcpServers: { affine: { command: "npx" } } });
     expect(run(["install", "codebuddy"], ctx)).toBe(0);
     expect(run(["uninstall", "codebuddy"], ctx)).toBe(0);
     expect(readJson(settingsPath(ctx)).hooks).toBeUndefined();
-    const servers = readJson(mcpPath(ctx)).mcpServers;
+    const servers = readJson(deprecatedMcpPath(ctx)).mcpServers;
     expect(servers.affine).toBeDefined();
     expect(servers.hindsight).toBeUndefined();
+  });
+
+  it("uninstall sweeps our entry from every chain link, keeping foreign servers", () => {
+    const ctx = makeCtx();
+    expect(run(["install", "codebuddy"], ctx)).toBe(0); // lands in the recommended file
+    // A stale entry from an install under the old convention, dormant once the recommended
+    // file appeared — CodeBuddy no longer reads it, but it must not survive an uninstall.
+    writeJsonAt(deprecatedMcpPath(ctx), {
+      mcpServers: {
+        affine: { command: "npx" },
+        hindsight: { command: "node", args: [join(ctx.dist, "mcp-server.js")] },
+      },
+    });
+    expect(run(["uninstall", "codebuddy"], ctx)).toBe(0);
+    expect(readJson(mcpPath(ctx)).mcpServers).toBeUndefined();
+    const deprecated = readJson(deprecatedMcpPath(ctx)).mcpServers;
+    expect(deprecated.affine).toBeDefined();
+    expect(deprecated.hindsight).toBeUndefined();
   });
 });
 
