@@ -28,9 +28,10 @@ describe("HARNESS_NAMES", () => {
         "zcode",
         "workbuddy",
         "codebuddy",
+        "traecode",
       ])
     );
-    expect(HARNESS_NAMES).toHaveLength(20);
+    expect(HARNESS_NAMES).toHaveLength(21);
   });
 });
 

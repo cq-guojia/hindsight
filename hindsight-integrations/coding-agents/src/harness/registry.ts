@@ -78,6 +78,8 @@ export const HARNESS_NAMES = [
   // registration in CodeBuddy's priority-chained MCP file (see src/installer.ts). It shares
   // WorkBuddy's transcript reader — same engine, same on-disk schema.
   "codebuddy",
+  // TraeCode is a per-prompt HOOK host registered in ~/.trae-cn/hooks.json (see src/installer.ts).
+  "traecode",
 ];
 
 const HOOK_BINS: Record<string, string> = {
@@ -94,6 +96,7 @@ const HOOK_BINS: Record<string, string> = {
   zcode: "hindsight-zcode-hook",
   workbuddy: "hindsight-workbuddy-hook",
   codebuddy: "hindsight-codebuddy-hook",
+  traecode: "hindsight-traecode-hook",
   // more hook harnesses: add a HookSpec entry point (see src/cursor-hook.ts) + a registration here.
 };
 

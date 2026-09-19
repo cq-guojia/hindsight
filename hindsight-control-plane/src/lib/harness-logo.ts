@@ -114,6 +114,7 @@ export const HARNESS_LOGO_REGISTRY: Record<string, HarnessLogoEntry> = {
   zcode: { id: "zcode", label: "ZCode", src: "/img/harness/zcode.svg" },
   workbuddy: { id: "workbuddy", label: "WorkBuddy", src: "/img/harness/workbuddy.png" },
   codebuddy: { id: "codebuddy", label: "CodeBuddy", src: "/img/harness/codebuddy.png" },
+  traecode: { id: "traecode", label: "TraeCode", src: "/img/harness/traecode.svg" },
 };
 
 const HARNESS_TAG_PREFIX = "harness:";

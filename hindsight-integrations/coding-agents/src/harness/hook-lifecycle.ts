@@ -33,7 +33,8 @@ export type HookHarnessName =
   | "factory-droid"
   | "zcode"
   | "workbuddy"
-  | "codebuddy";
+  | "codebuddy"
+  | "traecode";
 export type HookLifecycle = "sessionStart" | "prompt" | "stop";
 /**
  * How the HOST spells one hook registration.
@@ -622,6 +623,51 @@ export const HOOK_HARNESSES: Record<HookHarnessName, HookHarnessSpec> = {
         cwd: ev.cwd as string | undefined,
       }),
       readTranscript: readCodebuddyTranscript,
+    },
+  },
+  /**
+   * TraeCode (TRAE CN's agent) also speaks Claude Code's hook protocol — `prompt`/`cwd`/`session_id`
+   * in, `hookSpecificOutput.additionalContext` + `systemMessage` out — with registrations nested
+   * under the top-level `hooks` key of `~/.trae-cn/hooks.json` (unlike Factory Droid, whose event
+   * map IS the file) and a `version` field the host writes and expects.
+   *
+   * Like ZCode, what it does not have is a TRANSCRIPT: sessions live in an encrypted local DB or
+   * the cloud and no `transcript_path` is ever supplied, so this is the second harness that retains
+   * from the plugin's own journal (core/turn-journal.ts) — the prompt hook appends the user turn,
+   * and Stop's `last_assistant_message` (the full reply) plays the role ZCode's `responseText`
+   * plays: `journal.assistantText` closes the turn with it.
+   */
+  traecode: {
+    configStyle: "nested",
+    install: {
+      sessionStart: { event: "SessionStart", entry: "traecode-sessionstart-hook.js", timeout: 30 },
+      prompt: { event: "UserPromptSubmit", entry: "traecode-hook.js", timeout: 30 },
+      stop: { event: "Stop", entry: "traecode-stop-hook.js", timeout: 60 },
+    },
+    sessionStart: standardSessionStart("traecode"),
+    prompt: {
+      ...claudePrompt,
+      harness: "traecode",
+      journalPrompt: true,
+      // TraeCode's UserPromptSubmit payload carries `prompt` exactly like Claude Code's.
+      parse: (ev) => ({
+        prompt: ev.prompt as string | undefined,
+        cwd: ev.cwd as string | undefined,
+        sessionId: ev.session_id as string | undefined,
+      }),
+    },
+    retain: {
+      hostTimeoutSec: 60,
+      harness: "traecode",
+      // No transcriptPath: the journal supplies it (see `journal` below).
+      parse: (ev) => ({
+        sessionId: ev.session_id as string | undefined,
+        cwd: ev.cwd as string | undefined,
+      }),
+      journal: {
+        // `last_assistant_message` is the full reply — TraeCode's `responseText`.
+        assistantText: (ev) => ((ev.last_assistant_message as string | undefined) ?? "").trim(),
+      },
     },
   },
 };
