@@ -21,6 +21,25 @@ import { parse as parseToml } from "smol-toml";
 
 const homes: string[] = [];
 
+// TraeCode resolves its user-level MCP file by Electron's OS conventions, which consult APPDATA
+// (win32) and XDG_CONFIG_HOME (linux). Left set, the install writes OUTSIDE the temp ctx.home —
+// the CI runner's XDG_CONFIG_HOME is exactly how the family sweep at "MCP registrations name the
+// calling harness" lost the file and failed on linux while every traecode-specific test (which
+// pinned the env locally) passed. Pin the whole file instead: no per-harness describe should have
+// to remember this, the same lesson as SKILL_DIRS — the list everyone forgets lives once.
+let savedEnv: Record<string, string | undefined>;
+beforeAll(() => {
+  savedEnv = { APPDATA: process.env.APPDATA, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME };
+  delete process.env.APPDATA;
+  delete process.env.XDG_CONFIG_HOME;
+});
+afterAll(() => {
+  for (const [k, v] of Object.entries(savedEnv)) {
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+});
+
 function makeCtx(): InstallCtx & {
   claudeMcp: ReturnType<typeof vi.fn>;
   qwenMcp: ReturnType<typeof vi.fn>;
@@ -573,8 +592,8 @@ describe("zcode installer", () => {
 
 describe("traecode installer", () => {
   const hooksPath = (ctx: InstallCtx) => join(ctx.home, ".trae-cn", "hooks.json");
-  // Mirrors traecodeMcpPath's root choice. The env vars it consults are cleared below so the
-  // resolution lands inside the temp home on every host platform.
+  // Mirrors traecodeMcpPath's root choice. The env vars it consults are cleared for the whole
+  // file (see the top-level beforeAll) so the resolution lands inside the temp home everywhere.
   const mcpPath = (ctx: InstallCtx) => {
     const root =
       process.platform === "darwin"
@@ -584,19 +603,6 @@ describe("traecode installer", () => {
           : join(ctx.home, ".config");
     return join(root, "Trae CN", "User", "mcp.json");
   };
-
-  let savedEnv: Record<string, string | undefined>;
-  beforeAll(() => {
-    savedEnv = { APPDATA: process.env.APPDATA, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME };
-    delete process.env.APPDATA;
-    delete process.env.XDG_CONFIG_HOME;
-  });
-  afterAll(() => {
-    for (const [k, v] of Object.entries(savedEnv)) {
-      if (v === undefined) delete process.env[k];
-      else process.env[k] = v;
-    }
-  });
 
   it("registers the three hooks under the hooks key of ~/.trae-cn/hooks.json, in Claude's nested shape", () => {
     // TraeCode reads the event map from the top-level `hooks` KEY (Claude Code's settings.json
