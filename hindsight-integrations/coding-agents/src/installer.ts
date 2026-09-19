@@ -1898,8 +1898,8 @@ const traecodeMcpPath = (c: InstallCtx): string => {
     process.platform === "darwin"
       ? join(c.home, "Library", "Application Support")
       : process.platform === "win32"
-        ? process.env.APPDATA ?? join(c.home, "AppData", "Roaming")
-        : process.env.XDG_CONFIG_HOME ?? join(c.home, ".config");
+        ? (process.env.APPDATA ?? join(c.home, "AppData", "Roaming"))
+        : (process.env.XDG_CONFIG_HOME ?? join(c.home, ".config"));
   for (const brand of ["Trae CN", "Trae"]) {
     const dir = join(root, brand);
     if (existsSync(dir)) return join(dir, "User", "mcp.json");

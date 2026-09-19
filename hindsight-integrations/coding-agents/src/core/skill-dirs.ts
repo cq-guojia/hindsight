@@ -55,7 +55,10 @@ export const SKILL_DIRS: Record<string, string[]> = {
 const TRAE_DOT_DIRS = [".trae-cn", ".trae"];
 
 /** The edition's dot-dir NAME under home (kept relative — SKILL_DIRS parts are home-relative). */
-export const traecodeDotDirName = (home: string, exists: (p: string) => boolean = existsSync): string => {
+export const traecodeDotDirName = (
+  home: string,
+  exists: (p: string) => boolean = existsSync
+): string => {
   for (const dir of TRAE_DOT_DIRS) {
     if (exists(join(home, dir))) return dir;
   }
