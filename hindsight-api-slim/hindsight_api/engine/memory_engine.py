@@ -604,6 +604,7 @@ from .search.tags import TagGroup, TagsMatch, build_tag_groups_where_clause, bui
 from .search.types import ScoredResult
 from .source_facts import select_source_facts_within_budget
 from .task_backend import TaskBackend
+from .time_filter import DOCUMENT_TIME_FIELDS, build_time_clause, validate_time_window
 
 # Recall ranking strategy: how the per-arm (semantic/bm25/graph/temporal) results are
 # fused and reranked into the final order.
@@ -1402,8 +1403,33 @@ def _entity_map_from_results(
     return out
 
 
+def _is_foreign_key_violation(e: Exception) -> bool:
+    """Return True for a foreign-key violation on either dialect.
+
+    Oracle folds every constraint kind into ``IntegrityError``, so the FK case is
+    picked out by code: ORA-02291, parent key not found. That is the inserting
+    side, which is the side that fails — every FK in the Oracle baseline is
+    ON DELETE CASCADE or SET NULL, so a delete never raises ORA-02292.
+    """
+    if isinstance(e, asyncpg.exceptions.ForeignKeyViolationError):
+        return True
+    if not _is_oracledb_integrity_error(e):
+        return False
+    code = getattr(e.args[0], "code", None) if e.args else None
+    return code == 2291
+
+
 def _is_non_retryable_task_error(e: Exception) -> bool:
     """Classify deterministic task failures that should skip worker retry."""
+    # A foreign-key violation here is a concurrency race, not bad data: a retain
+    # writes unit_entities for units a concurrent delete is removing (see
+    # ``delete_document``, which documents the race it runs in). The row the
+    # write needed is gone *this moment*, not wrong — the retry finds a settled
+    # database and succeeds. Classifying it with its deterministic
+    # IntegrityConstraintViolationError siblings sent those retains terminal at
+    # retry_count=0 and dropped the content silently (issue #4453).
+    if _is_foreign_key_violation(e):
+        return False
     return (
         isinstance(e, asyncpg.exceptions.IntegrityConstraintViolationError)
         or _is_oracledb_integrity_error(e)
@@ -12777,6 +12803,9 @@ class MemoryEngine(MemoryEngineInterface):
         tags: list[str] | None = None,
         tags_match: TagsMatch = "any",
         created_before: datetime | None = None,
+        time_field: str | None = None,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
         limit: int = 100,
         offset: int = 0,
         request_context: "RequestContext",
@@ -12798,7 +12827,15 @@ class MemoryEngine(MemoryEngineInterface):
                 archive carries no entity links.
             created_before: Keep only units ingested strictly before this instant
                 (``created_at < created_before``). An ingest-age filter for
-                retention / bulk-maintenance sweeps.
+                retention / bulk-maintenance sweeps. Independent of the
+                ``time_field`` window below, which it predates.
+            time_field: Time axis to filter and order by — one of created_at,
+                updated_at, mentioned_at, occurred_start, occurred_end. Supplying
+                it (or either bound) replaces the default ordering with that axis
+                and EXCLUDES units carrying no value on it, so ``total`` counts
+                only dated units. See :mod:`hindsight_api.engine.time_filter`.
+            start_date: Inclusive lower bound on ``time_field``.
+            end_date: Exclusive upper bound on ``time_field`` (half-open window).
             tags: Optional list of tag names to filter by. When omitted, no tag
                 filtering is applied (except tags_match='exact', which then selects
                 the untagged/global scope).
@@ -12851,6 +12888,9 @@ class MemoryEngine(MemoryEngineInterface):
                 tags=tags,
                 tags_match=tags_match,
                 created_before=created_before,
+                time_field=time_field,
+                start_date=start_date,
+                end_date=end_date,
                 limit=limit,
                 offset=offset,
             )
@@ -12908,6 +12948,9 @@ class MemoryEngine(MemoryEngineInterface):
         search_query: str | None = None,
         tags: list[str] | None = None,
         tags_match: "TagsMatch" = "any_strict",
+        time_field: str | None = None,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
         limit: int = 100,
         offset: int = 0,
         request_context: "RequestContext",
@@ -12923,6 +12966,11 @@ class MemoryEngine(MemoryEngineInterface):
             search_query: Search in document ID
             tags: Filter by tags
             tags_match: How to match tags (any, all, any_strict, all_strict)
+            time_field: Time axis to filter and order by — ``created_at`` (when the
+                document first arrived) or ``updated_at`` (its last write, the
+                default ordering). See :mod:`hindsight_api.engine.time_filter`.
+            start_date: Inclusive lower bound on ``time_field``.
+            end_date: Exclusive upper bound on ``time_field`` (half-open window).
             limit: Maximum number of results
             offset: Offset for pagination
             request_context: Request context for authentication.
@@ -12940,6 +12988,13 @@ class MemoryEngine(MemoryEngineInterface):
             await self._validate_operation(self._operation_validator.validate_bank_read(ctx))
         await self._require_bank_exists(bank_id)
 
+        # Validated here rather than inside the SQL builder below, because the store-owned branch
+        # never reaches it: without this, an inverted window is a 400 on Postgres and a silently
+        # empty page on a store that owns its documents.
+        validate_time_window(
+            time_field=time_field, start_date=start_date, end_date=end_date, allowed=DOCUMENT_TIME_FIELDS
+        )
+
         # A store that owns its document metadata keeps no rows in the SQL `documents` table, so the
         # query below would return an empty page for it. List from the store's own registry instead.
         from .memories import get_memories
@@ -12950,11 +13005,15 @@ class MemoryEngine(MemoryEngineInterface):
             # unfiltered page — every document, including the untagged ones a strict mode excludes
             # — with a `total` that ignored the filter. The store applies them and counts what
             # matches, the same way the SQL branch below does.
+            # The time window goes WITH the call for the same reason tags do — see above.
             return await _docs_store.list_documents(
                 bank_id=bank_id,
                 search_query=search_query,
                 tags=tags,
                 tags_match=tags_match,
+                time_field=time_field,
+                start_date=start_date,
+                end_date=end_date,
                 limit=limit,
                 offset=offset,
             )
@@ -12981,6 +13040,18 @@ class MemoryEngine(MemoryEngineInterface):
             next_param = built.next_param_offset
             query_params.extend(tags_params)
             param_count = next_param - 1  # next_param is next available; convert to last used
+
+            window = build_time_clause(
+                time_field=time_field,
+                start_date=start_date,
+                end_date=end_date,
+                allowed=DOCUMENT_TIME_FIELDS,
+                default_field="updated_at",
+                param_offset=param_count + 1,
+            )
+            query_conditions.extend(window.conditions)
+            query_params.extend(window.params)
+            param_count = window.next_param_offset - 1
 
             where_clause = "WHERE " + " AND ".join(query_conditions) if query_conditions else ""
             if tags_clause:
@@ -13018,7 +13089,7 @@ class MemoryEngine(MemoryEngineInterface):
                     tags
                 FROM {fq_table("documents")}
                 {where_clause}
-                ORDER BY updated_at DESC, created_at DESC, id
+                ORDER BY {window.order_by or "updated_at DESC, created_at DESC, id"}
                 LIMIT {limit_param} OFFSET {offset_param}
             """,
                 *query_params,
@@ -14944,6 +15015,8 @@ class MemoryEngine(MemoryEngineInterface):
         recall_include_chunks: bool | None = None,
         recall_max_tokens_override: int | None = None,
         recall_chunks_max_tokens_override: int | None = None,
+        reflect_search_observations_max_tokens_override: int | None = None,
+        reflect_search_observations_include_entities_override: bool | None = None,
         created_after: datetime | None = None,
         created_before: datetime | None = None,
         answer_as_document: bool = False,
@@ -15114,6 +15187,36 @@ class MemoryEngine(MemoryEngineInterface):
             "reflect_source_facts_max_tokens", DEFAULT_REFLECT_SOURCE_FACTS_MAX_TOKENS
         )
 
+        # Reflect options an operator can default per bank: caller arg (the reflect
+        # request, or the mental model's trigger) → bank reflect_default_options →
+        # the shipped default. Unlike the recall budgets these have no flat config
+        # key of their own — they are reflect's own knobs, so they live together in
+        # one object shaped like the request fields that carry them (#4483).
+        reflect_defaults: dict[str, Any] = config_dict.get("reflect_default_options") or {}
+
+        def _reflect_option(override: Any, key: str, shipped: Any) -> Any:
+            """Resolve one option, treating only None as "not set".
+
+            ``or`` would be wrong on both fields: it reads a configured ``false``
+            (entities off) and a small budget as absent and silently restores the
+            shipped default -- the exact setting the operator asked for.
+            """
+            if override is not None:
+                return override
+            configured = reflect_defaults.get(key)
+            return shipped if configured is None else configured
+
+        effective_observations_max_tokens = _reflect_option(
+            reflect_search_observations_max_tokens_override,
+            "reflect_search_observations_max_tokens",
+            DEFAULT_OBSERVATIONS_TOOL_MAX_TOKENS,
+        )
+        effective_observations_include_entities = _reflect_option(
+            reflect_search_observations_include_entities_override,
+            "reflect_search_observations_include_entities",
+            True,
+        )
+
         # Resolve recall overrides: caller arg (e.g. mental model trigger) → bank config → env default
         effective_recall_include_chunks = (
             recall_include_chunks
@@ -15143,7 +15246,7 @@ class MemoryEngine(MemoryEngineInterface):
         tool_token_limits = ReflectToolTokenLimits(
             recall_max_tokens=effective_recall_max_tokens,
             recall_chunk_max_tokens=effective_recall_chunks_max_tokens,
-            observations_max_tokens=DEFAULT_OBSERVATIONS_TOOL_MAX_TOKENS,
+            observations_max_tokens=effective_observations_max_tokens,
         )
 
         async def search_observations_fn(q: str, max_tokens: int) -> dict[str, Any]:
@@ -15159,6 +15262,7 @@ class MemoryEngine(MemoryEngineInterface):
                 last_consolidated_at=last_consolidated_at,
                 pending_consolidation=pending_consolidation,
                 source_facts_max_tokens=reflect_source_facts_max_tokens,
+                include_entities=effective_observations_include_entities,
                 created_after=created_after,
                 created_before=created_before,
             )
@@ -17051,6 +17155,10 @@ class MemoryEngine(MemoryEngineInterface):
         recall_include_chunks_override = trigger_data.get("include_chunks")
         recall_max_tokens_override = trigger_data.get("recall_max_tokens")
         recall_chunks_max_tokens_override = trigger_data.get("recall_chunks_max_tokens")
+        reflect_search_observations_max_tokens_override = trigger_data.get("reflect_search_observations_max_tokens")
+        reflect_search_observations_include_entities_override = trigger_data.get(
+            "reflect_search_observations_include_entities"
+        )
         requested_mode: RefreshMode = trigger_data.get("mode") or "full"
 
         current_content = (mental_model.get("content") or "").strip()
@@ -17145,6 +17253,8 @@ class MemoryEngine(MemoryEngineInterface):
             recall_include_chunks=recall_include_chunks_override,
             recall_max_tokens_override=recall_max_tokens_override,
             recall_chunks_max_tokens_override=recall_chunks_max_tokens_override,
+            reflect_search_observations_max_tokens_override=reflect_search_observations_max_tokens_override,
+            reflect_search_observations_include_entities_override=reflect_search_observations_include_entities_override,
             # The refresh stores a document, so the agent states its structure and
             # the markdown is rendered from it. The model never writes the markdown
             # that gets persisted, and nothing has to read markdown back to find
