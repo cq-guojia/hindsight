@@ -7,6 +7,7 @@
 import { runHook, type HookSpec } from "../core/hook";
 import { runRetainHook, type RetainHookSpec } from "../core/retain-hook";
 import { runSessionStartHook, type SessionStartHookSpec } from "../core/session-start";
+import { ensureTraecodeWorkspaceMcp } from "../core/traecode-mcp";
 import { readCodexTranscript } from "../core/transcript-codex";
 import { readCursorTranscript } from "../core/transcript-cursor";
 import { readAntigravityTranscript } from "../core/transcript-antigravity";
@@ -580,7 +581,13 @@ export const HOOK_HARNESSES: Record<HookHarnessName, HookHarnessSpec> = {
       prompt: { event: "UserPromptSubmit", entry: "traecode-hook.js", timeout: 30 },
       stop: { event: "Stop", entry: "traecode-stop-hook.js", timeout: 60 },
     },
-    sessionStart: standardSessionStart("traecode"),
+    sessionStart: {
+      ...standardSessionStart("traecode"),
+      // Trae launches USER-level MCP servers from the Electron process's cwd (home), where an
+      // optInOnly config self-disables and the tools vanish. Each repo's own workspace file fixes
+      // it — kept current here, once memory is confirmed live for the repo (core/traecode-mcp.ts).
+      ensureMcpRegistration: (cwd) => ensureTraecodeWorkspaceMcp(cwd),
+    },
     prompt: {
       ...claudePrompt,
       harness: "traecode",
