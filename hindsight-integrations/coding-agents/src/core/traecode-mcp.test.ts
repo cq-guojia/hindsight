@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, afterAll, describe, expect, it } from "vitest";
 import {
   enableWorkspaceMcpSetting,
   ensureTraecodeWorkspaceMcp,
@@ -16,6 +16,29 @@ import {
   workspaceMcpHint,
 } from "./traecode-mcp";
 import { HOOK_HARNESSES } from "../harness/hook-lifecycle";
+
+/** Pin the userData-env vars to their defaults so path resolution lands inside the temp homes on
+ *  every platform (a runner-set XDG_CONFIG_HOME would point the Trae-brand probe elsewhere). */
+let savedEnv: Record<string, string | undefined>;
+beforeAll(() => {
+  savedEnv = { APPDATA: process.env.APPDATA, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME };
+  delete process.env.APPDATA;
+  delete process.env.XDG_CONFIG_HOME;
+});
+afterAll(() => {
+  for (const [k, v] of Object.entries(savedEnv)) {
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+});
+
+/** Mirrors traecodeUserDataDir's root choice (env pinned by the beforeAll above). */
+const userDataRoot = (home: string) =>
+  process.platform === "darwin"
+    ? join(home, "Library", "Application Support")
+    : process.platform === "win32"
+      ? join(home, "AppData", "Roaming")
+      : join(home, ".config");
 
 /** The seed shells out to the system sqlite3 — absent on some runners, so the DB-backed tests
  *  gate on a probe instead of assuming. */
@@ -292,7 +315,7 @@ describe("workspace enable switch seed", () => {
    *  ItemTable pre-seeded via (key, value) pairs. Returns the DB path. */
   const homeWithWorkspace = (repo: string, rows: [string, string][] = []) => {
     const home = tmp("home-");
-    const ws = join(home, "Library", "Application Support", "Trae CN", "User", "workspaceStorage", "hash1");
+    const ws = join(userDataRoot(home), "Trae CN", "User", "workspaceStorage", "hash1");
     mkdirSync(ws, { recursive: true });
     writeFileSync(join(ws, "workspace.json"), JSON.stringify({ folder: pathToFileURL(repo).href }));
     const db = join(ws, "state.vscdb");
@@ -405,7 +428,7 @@ describe("ensureTraecodeWorkspaceMcp hint selection", () => {
   it.runIf(hasSqlite3)("silent when the gate is on and the seed succeeds", () => {
     const repo = tmp("repo-");
     const home = homeWithSettings('{"trae.mcp.enableWorkspaceMcp":true}');
-    const ws = join(home, "Library", "Application Support", "Trae CN", "User", "workspaceStorage", "hash1");
+    const ws = join(userDataRoot(home), "Trae CN", "User", "workspaceStorage", "hash1");
     mkdirSync(ws, { recursive: true });
     writeFileSync(join(ws, "workspace.json"), JSON.stringify({ folder: pathToFileURL(repo).href }));
     execFileSync("sqlite3", [
