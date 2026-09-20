@@ -2,7 +2,14 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { ensureTraecodeWorkspaceMcp } from "./traecode-mcp";
+import {
+  enableWorkspaceMcpSetting,
+  ensureTraecodeWorkspaceMcp,
+  markWorkspaceMcpEnabled,
+  traecodeUserSettingsPath,
+  workspaceMcpGateState,
+  workspaceMcpHint,
+} from "./traecode-mcp";
 import { HOOK_HARNESSES } from "../harness/hook-lifecycle";
 
 describe("ensureTraecodeWorkspaceMcp", () => {
@@ -16,19 +23,21 @@ describe("ensureTraecodeWorkspaceMcp", () => {
     for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
   });
 
-  /** A repo dir plus a fake dist carrying an (empty) mcp-server.js. */
+  /** A repo dir plus a fake dist carrying an (empty) mcp-server.js, and an isolated HOME so the
+   *  hint's gate check never touches the developer's real Trae settings or the dev-tree state. */
   const repo = () => {
     const dir = tmp("traecode-mcp-repo-");
     const dist = tmp("traecode-mcp-dist-");
+    const home = tmp("traecode-mcp-home-");
     writeFileSync(join(dist, "mcp-server.js"), "// stub");
-    return { repo: dir, dist };
+    return { repo: dir, dist, home };
   };
   const mcpFile = (r: string) => join(r, ".trae", "mcp.json");
   const readJson = (r: string) => JSON.parse(readFileSync(mcpFile(r), "utf8"));
 
   it("writes the workspace registration when the file is absent", () => {
-    const { repo: r, dist } = repo();
-    ensureTraecodeWorkspaceMcp(r, { dist });
+    const { repo: r, dist, home } = repo();
+    ensureTraecodeWorkspaceMcp(r, { dist, home });
     const doc = readJson(r);
     expect(doc.mcpServers.hindsight).toEqual({
       command: "node",
@@ -38,15 +47,15 @@ describe("ensureTraecodeWorkspaceMcp", () => {
   });
 
   it("is idempotent: a second run rewrites nothing", () => {
-    const { repo: r, dist } = repo();
-    ensureTraecodeWorkspaceMcp(r, { dist });
+    const { repo: r, dist, home } = repo();
+    ensureTraecodeWorkspaceMcp(r, { dist, home });
     const before = readFileSync(mcpFile(r), "utf8");
-    ensureTraecodeWorkspaceMcp(r, { dist });
+    ensureTraecodeWorkspaceMcp(r, { dist, home });
     expect(readFileSync(mcpFile(r), "utf8")).toBe(before);
   });
 
   it("preserves sibling servers and merges env into an existing OUR entry", () => {
-    const { repo: r, dist } = repo();
+    const { repo: r, dist, home } = repo();
     mkdirSync(join(r, ".trae"), { recursive: true });
     writeFileSync(
       mcpFile(r),
@@ -61,7 +70,7 @@ describe("ensureTraecodeWorkspaceMcp", () => {
         },
       })
     );
-    ensureTraecodeWorkspaceMcp(r, { dist });
+    ensureTraecodeWorkspaceMcp(r, { dist, home });
     const doc = readJson(r);
     expect(doc.mcpServers.other).toEqual({ command: "uvx", args: ["something"] });
     expect(doc.mcpServers.hindsight).toEqual({
@@ -76,48 +85,48 @@ describe("ensureTraecodeWorkspaceMcp", () => {
   });
 
   it("never touches a foreign hindsight entry", () => {
-    const { repo: r, dist } = repo();
+    const { repo: r, dist, home } = repo();
     mkdirSync(join(r, ".trae"), { recursive: true });
     const foreign = { command: "python", args: ["-m", "my_hindsight"] };
     writeFileSync(mcpFile(r), JSON.stringify({ mcpServers: { hindsight: foreign } }));
-    ensureTraecodeWorkspaceMcp(r, { dist });
+    ensureTraecodeWorkspaceMcp(r, { dist, home });
     expect(readJson(r).mcpServers.hindsight).toEqual(foreign);
   });
 
   it("leaves an unparseable file alone", () => {
-    const { repo: r, dist } = repo();
+    const { repo: r, dist, home } = repo();
     mkdirSync(join(r, ".trae"), { recursive: true });
     writeFileSync(mcpFile(r), "{ not json");
-    ensureTraecodeWorkspaceMcp(r, { dist });
+    ensureTraecodeWorkspaceMcp(r, { dist, home });
     expect(readFileSync(mcpFile(r), "utf8")).toBe("{ not json");
   });
 
   describe("gitignore", () => {
     it("appends the ignore line to an existing .gitignore when creating the file", () => {
-      const { repo: r, dist } = repo();
+      const { repo: r, dist, home } = repo();
       writeFileSync(join(r, ".gitignore"), "node_modules\n");
-      ensureTraecodeWorkspaceMcp(r, { dist });
+      ensureTraecodeWorkspaceMcp(r, { dist, home });
       const gitignore = readFileSync(join(r, ".gitignore"), "utf8");
       expect(gitignore).toContain("node_modules\n");
       expect(gitignore).toContain(".trae/mcp.json");
     });
 
     it("creates no .gitignore when the repo has none", () => {
-      const { repo: r, dist } = repo();
-      ensureTraecodeWorkspaceMcp(r, { dist });
+      const { repo: r, dist, home } = repo();
+      ensureTraecodeWorkspaceMcp(r, { dist, home });
       expect(existsSync(join(r, ".gitignore"))).toBe(false);
     });
 
     it("does not append when .trae is already ignored", () => {
-      const { repo: r, dist } = repo();
+      const { repo: r, dist, home } = repo();
       writeFileSync(join(r, ".gitignore"), "node_modules\n.trae/\n");
-      ensureTraecodeWorkspaceMcp(r, { dist });
+      ensureTraecodeWorkspaceMcp(r, { dist, home });
       expect(readFileSync(join(r, ".gitignore"), "utf8")).toBe("node_modules\n.trae/\n");
     });
   });
 
   it("does nothing for home, root, or relative cwd", () => {
-    const { repo: r, dist } = repo();
+    const { repo: r, dist, home } = repo();
     ensureTraecodeWorkspaceMcp(homedir(), { dist });
     ensureTraecodeWorkspaceMcp("/", { dist });
     ensureTraecodeWorkspaceMcp("relative/path", { dist });
@@ -126,7 +135,7 @@ describe("ensureTraecodeWorkspaceMcp", () => {
   });
 
   it("does nothing when the dist has no mcp-server.js (unbuilt tree)", () => {
-    const { repo: r } = repo();
+    const { repo: r, home } = repo();
     const empty = tmp("traecode-mcp-empty-");
     ensureTraecodeWorkspaceMcp(r, { dist: empty });
     expect(existsSync(mcpFile(r))).toBe(false);
@@ -140,5 +149,112 @@ describe("traecode sessionStart spec wiring", () => {
       .filter(([, spec]) => spec.sessionStart.ensureMcpRegistration !== undefined)
       .map(([name]) => name);
     expect(wired).toEqual(["traecode"]);
+  });
+});
+
+// ── the workspace-MCP gate (trae.mcp.enableWorkspaceMcp) ──────────────────────────────────────
+
+describe("workspace-MCP gate", () => {
+  const dirs: string[] = [];
+  const tmp = (p: string) => {
+    const d = mkdtempSync(join(tmpdir(), p));
+    dirs.push(d);
+    return d;
+  };
+  afterEach(() => {
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
+  /** A fake HOME with a Trae userData settings.json pre-written. */
+  const homeWithSettings = (content?: string) => {
+    const home = tmp("traecode-gate-home-");
+    const settings = traecodeUserSettingsPath(home);
+    if (content !== undefined) {
+      mkdirSync(join(settings, ".."), { recursive: true });
+      writeFileSync(settings, content);
+    }
+    return { home, settings };
+  };
+
+  describe("workspaceMcpGateState", () => {
+    it("reads plain JSON settings", () => {
+      expect(
+        workspaceMcpGateState(homeWithSettings('{"trae.mcp.enableWorkspaceMcp":true}').settings)
+      ).toBe("on");
+      expect(workspaceMcpGateState(homeWithSettings("{}").settings)).toBe("off");
+      expect(
+        workspaceMcpGateState(homeWithSettings('{"trae.mcp.enableWorkspaceMcp":false}').settings)
+      ).toBe("off");
+    });
+
+    it("falls back to a targeted regex for comment-bearing (JSONC) files", () => {
+      expect(
+        workspaceMcpGateState(
+          homeWithSettings('{\n  // comment\n  "trae.mcp.enableWorkspaceMcp": true\n}').settings
+        )
+      ).toBe("on");
+      expect(workspaceMcpGateState(homeWithSettings("{\n  // just a comment\n}").settings)).toBe(
+        "unknown"
+      );
+    });
+
+    it("reports unknown for an absent file", () => {
+      expect(workspaceMcpGateState(join(tmp("traecode-gate-x-"), "nope.json"))).toBe("unknown");
+    });
+  });
+
+  describe("enableWorkspaceMcpSetting", () => {
+    it("merges into an existing plain-JSON settings file, preserving keys", () => {
+      const { settings } = homeWithSettings('{"workbench.colorTheme":"Dark"}');
+      expect(enableWorkspaceMcpSetting(settings)).toBe(true);
+      const doc = JSON.parse(readFileSync(settings, "utf8"));
+      expect(doc["trae.mcp.enableWorkspaceMcp"]).toBe(true);
+      expect(doc["workbench.colorTheme"]).toBe("Dark");
+    });
+
+    it("creates the file when absent", () => {
+      const { settings } = homeWithSettings();
+      expect(enableWorkspaceMcpSetting(settings)).toBe(true);
+      expect(JSON.parse(readFileSync(settings, "utf8"))["trae.mcp.enableWorkspaceMcp"]).toBe(true);
+    });
+
+    it("refuses to rewrite a comment-bearing file", () => {
+      const raw = '{\n  // user comments\n  "a": 1\n}';
+      const { settings } = homeWithSettings(raw);
+      expect(enableWorkspaceMcpSetting(settings)).toBe(false);
+      expect(readFileSync(settings, "utf8")).toBe(raw);
+    });
+  });
+
+  describe("workspaceMcpHint", () => {
+    const stateFile = (dir: string) => join(dir, "state.json");
+
+    it("is silent when the gate reads on", () => {
+      const { home } = homeWithSettings('{"trae.mcp.enableWorkspaceMcp":true}');
+      expect(workspaceMcpHint({ home, stateFile: stateFile(tmp("s-")) })).toBeUndefined();
+    });
+
+    it("hints when the gate reads off, at most once a day", () => {
+      const { home } = homeWithSettings("{}");
+      const state = stateFile(tmp("s-"));
+      expect(workspaceMcpHint({ home, stateFile: state, now: 1_000 })).toMatch(/enableWorkspaceMcp/);
+      expect(workspaceMcpHint({ home, stateFile: state, now: 2_000 })).toBeUndefined();
+      expect(workspaceMcpHint({ home, stateFile: state, now: 86_500_000 })).toMatch(/enableWorkspaceMcp/);
+      expect(JSON.parse(readFileSync(state, "utf8")).lastHint).toBe(86_500_000);
+    });
+
+    it("stays silent on an unreadable settings file when the installer snapshot says enabled", () => {
+      const { home } = homeWithSettings(); // no settings file: "unknown"
+      const state = stateFile(tmp("s-"));
+      markWorkspaceMcpEnabled({ stateFile: state });
+      expect(workspaceMcpHint({ home, stateFile: state, now: 1_000 })).toBeUndefined();
+    });
+
+    it("hints on an unreadable settings file with no snapshot", () => {
+      const { home } = homeWithSettings();
+      expect(workspaceMcpHint({ home, stateFile: stateFile(tmp("s-")), now: 1_000 })).toMatch(
+        /enableWorkspaceMcp/
+      );
+    });
   });
 });

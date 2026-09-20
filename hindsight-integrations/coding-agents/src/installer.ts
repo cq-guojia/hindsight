@@ -46,6 +46,13 @@ import { importLocalHistory } from "./core/history";
 import { detectLlm, hasRustToolchain, hasUvx, type LlmChoice } from "./core/daemon";
 import { readLegacyEndpoint } from "./core/legacy";
 import { SKILL_DIRS, resolveSkillDirs, traecodeDotDirName } from "./core/skill-dirs";
+import {
+  enableWorkspaceMcpSetting,
+  markWorkspaceMcpEnabled,
+  traecodeUserDataDir,
+  traecodeUserSettingsPath,
+  workspaceMcpGateState,
+} from "./core/traecode-mcp";
 import { formatUsageReport, readUsage } from "./core/usage";
 import { createInstallerUi, type SelectOption } from "./install-ui";
 
@@ -91,6 +98,9 @@ export interface InstallCtx {
   hasRust?: () => boolean;
   /** Reads an old per-agent plugin's endpoint; injectable for tests. */
   readLegacy?: (home: string, prefer: readonly string[]) => ReturnType<typeof readLegacyEndpoint>;
+  /** The raw CLI arguments after the command word — harness installers read flags off this
+   *  (e.g. traecode's --enable-workspace-mcp) without each one re-parsing argv. */
+  args?: readonly string[];
   log?: (m: string) => void;
   /** Styles an interactive readLineSync prompt (the CLI passes the InstallerUi rail style). */
   promptStyle?: (q: string) => string;
@@ -1893,19 +1903,51 @@ const zcode: HarnessInstaller = {
  * international build `~/.trae` / "Trae", so every path resolves by probing for the brand dir that
  * actually exists and falling back to the CN names (see traecodeDotDir / traecodeMcpPath).
  */
-const traecodeMcpPath = (c: InstallCtx): string => {
-  const root =
-    process.platform === "darwin"
-      ? join(c.home, "Library", "Application Support")
-      : process.platform === "win32"
-        ? (process.env.APPDATA ?? join(c.home, "AppData", "Roaming"))
-        : (process.env.XDG_CONFIG_HOME ?? join(c.home, ".config"));
-  for (const brand of ["Trae CN", "Trae"]) {
-    const dir = join(root, brand);
-    if (existsSync(dir)) return join(dir, "User", "mcp.json");
+const traecodeMcpPath = (c: InstallCtx): string =>
+  join(traecodeUserDataDir(c.home), "User", "mcp.json");
+
+/**
+ * Trae gates workspace-level MCP files behind `trae.mcp.enableWorkspaceMcp` (global, default
+ * false) — without it the per-repo `.trae/mcp.json` this install relies on is never read and
+ * hindsight's MCP tools stay hidden. Flipping a global setting is the user's call, so it is
+ * asked HERE, on the installer's TTY: `install` is idempotent and re-run often, and the gate
+ * state makes the prompt self-silencing once answered. Non-interactive runs (CI, scripts, the
+ * test suite) print the manual step and touch nothing — a global setting must never flip
+ * without a human; `--enable-workspace-mcp` is that human, up front.
+ */
+function ensureTraecodeWorkspaceMcpGate(c: InstallCtx): void {
+  const settingsPath = traecodeUserSettingsPath(c.home);
+  if (workspaceMcpGateState(settingsPath) === "on") return;
+  const ask =
+    "\n" +
+    "  Trae ignores per-repo MCP configs until workspace MCP is enabled, which keeps\n" +
+    "  hindsight's MCP tools hidden. Enable it globally now? (one-time setting)\n";
+  const skipNote =
+    '  Skipped. Enable later in Trae settings (search "enableWorkspaceMcp") or re-run with\n' +
+    "  --enable-workspace-mcp.";
+  if (!(c.args ?? []).includes("--enable-workspace-mcp")) {
+    if (c.interactive !== true) {
+      c.log?.(`${ask}  ${skipNote}`);
+      return;
+    }
+    const answer = readLineSync(c, `${ask}  Enable workspace MCP? [Y/n]: `).trim().toLowerCase();
+    if (answer === "n" || answer === "no") {
+      c.log?.(skipNote);
+      return;
+    }
   }
-  return join(root, "Trae CN", "User", "mcp.json");
-};
+  if (enableWorkspaceMcpSetting(settingsPath)) {
+    markWorkspaceMcpEnabled();
+    c.log?.(
+      `traecode: workspace MCP enabled in ${settingsPath} — restart Trae windows to pick it up`
+    );
+  } else {
+    c.log?.(
+      `traecode: could not update ${settingsPath} (comments or unreadable JSON) — set\n` +
+        `  "trae.mcp.enableWorkspaceMcp": true in Trae settings instead.`
+    );
+  }
+}
 
 const traecode: HarnessInstaller = {
   name: "traecode",
@@ -1951,6 +1993,8 @@ const traecode: HarnessInstaller = {
       writeJson(sandboxPath, sandbox);
       c.log?.(`traecode: sandbox readWrite rule added for ${hindsightHome}`);
     }
+
+    ensureTraecodeWorkspaceMcpGate(c);
   },
   uninstall(c) {
     const hooksPath = join(c.home, traecodeDotDirName(c.home), "hooks.json");
@@ -2066,6 +2110,7 @@ function importConversations(harness: string, ctx: InstallCtx): void {
 export function run(argv: string[], ctxIn: InstallCtx): number {
   let ctx = ctxIn;
   const [command, ...rawArgs] = argv;
+  ctx = { ...ctx, args: rawArgs };
   // `--import-conversations` backfills this repo's PAST sessions for the harness being installed —
   // the migration path off the older per-agent plugins, whose banks the server cannot merge into
   // this one. Opt-in: it re-extracts history and therefore costs tokens.
@@ -2108,7 +2153,7 @@ export function run(argv: string[], ctxIn: InstallCtx): number {
         `       hindsight-coding-agents update\n` +
         `       hindsight-coding-agents stats\n` +
         `       [--server cloud|self-hosted|daemon] [--api-url <url>] [--api-token <token>]\n` +
-        `       [--import-conversations]\n` +
+        `       [--import-conversations] [--enable-workspace-mcp]\n` +
         `  all      every agent detected on this machine\n` +
         `  harness  ${INSTALLERS.map((i) => i.name).join(", ")} (agy aliases antigravity-cli)\n` +
         `  update   re-stage the runtime only, leaving every host config untouched\n` +
