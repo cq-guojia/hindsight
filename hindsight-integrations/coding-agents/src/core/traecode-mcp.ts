@@ -237,7 +237,10 @@ export function ensureTraecodeWorkspaceMcp(
 
 /** The registration itself — merge-not-clobber, foreign entries untouched, idempotent. Never
  *  throws, never rewrites anything but our own entry, and does nothing when already correct. */
-function registerTraecodeWorkspaceMcp(cwd: string, opts: { home?: string; dist?: string } = {}): void {
+function registerTraecodeWorkspaceMcp(
+  cwd: string,
+  opts: { home?: string; dist?: string } = {}
+): void {
   try {
     const home = opts.home ?? homedir();
     // Trae launched the USER-level server from home — that is exactly the registration we are
@@ -361,18 +364,24 @@ export function ensureWorkspaceMcpEnabled(
     const home = opts.home ?? homedir();
     // Same guard as the registration: home/root/relative cwds are not Trae workspaces.
     if (!cwd || !isAbsolute(cwd) || dirname(cwd) === cwd || cwd === home) return "failed";
-    const dir = findWorkspaceStorageDir(join(traecodeUserDataDir(home), WORKSPACE_STORAGE_REL), cwd);
+    const dir = findWorkspaceStorageDir(
+      join(traecodeUserDataDir(home), WORKSPACE_STORAGE_REL),
+      cwd
+    );
     if (!dir) return "failed";
     const db = join(dir, "state.vscdb");
     if (!existsSync(db)) return "failed";
     const sqlite = opts.sqlite ?? execFileSync;
     const run = (sql: string): string =>
-      sqlite(
-        "sqlite3",
-        [db, ".timeout 3000", sql],
-        { encoding: "utf8", timeout: SQLITE_TIMEOUT_MS, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] } as const
-      ).trim();
-    if (run(`SELECT value FROM ItemTable WHERE key='${traecodeWorkspaceEnabledKey()}';`) === "true") {
+      sqlite("sqlite3", [db, ".timeout 3000", sql], {
+        encoding: "utf8",
+        timeout: SQLITE_TIMEOUT_MS,
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      } as const).trim();
+    if (
+      run(`SELECT value FROM ItemTable WHERE key='${traecodeWorkspaceEnabledKey()}';`) === "true"
+    ) {
       return "on";
     }
     run(
