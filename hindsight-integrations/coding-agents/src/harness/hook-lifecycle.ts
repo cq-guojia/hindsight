@@ -585,8 +585,10 @@ export const HOOK_HARNESSES: Record<HookHarnessName, HookHarnessSpec> = {
       ...standardSessionStart("traecode"),
       // Trae launches USER-level MCP servers from the Electron process's cwd (home), where an
       // optInOnly config self-disables and the tools vanish. Each repo's own workspace file fixes
-      // it — kept current here, once memory is confirmed live for the repo; the returned hint
-      // (workspace-MCP gate off) rides the session banner (core/traecode-mcp.ts).
+      // it — kept current here, once memory is confirmed live for the repo, along with the
+      // workspace's per-server enable switch (seeded into Trae's storage DB,
+      // core/traecode-mcp.ts). The returned hint (global gate off, or an unseedable switch)
+      // rides the session banner.
       ensureMcpRegistration: (cwd) => ensureTraecodeWorkspaceMcp(cwd),
     },
     prompt: {

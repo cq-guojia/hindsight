@@ -1,16 +1,32 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   enableWorkspaceMcpSetting,
   ensureTraecodeWorkspaceMcp,
+  ensureWorkspaceMcpEnabled,
   markWorkspaceMcpEnabled,
   traecodeUserSettingsPath,
+  traecodeWorkspaceEnabledKey,
+  workspaceEnableHint,
   workspaceMcpGateState,
   workspaceMcpHint,
 } from "./traecode-mcp";
 import { HOOK_HARNESSES } from "../harness/hook-lifecycle";
+
+/** The seed shells out to the system sqlite3 — absent on some runners, so the DB-backed tests
+ *  gate on a probe instead of assuming. */
+const hasSqlite3 = (() => {
+  try {
+    execFileSync("sqlite3", ["--version"], { stdio: ["ignore", "pipe", "pipe"] });
+    return true;
+  } catch {
+    return false;
+  }
+})();
 
 describe("ensureTraecodeWorkspaceMcp", () => {
   const dirs: string[] = [];
@@ -126,7 +142,7 @@ describe("ensureTraecodeWorkspaceMcp", () => {
   });
 
   it("does nothing for home, root, or relative cwd", () => {
-    const { repo: r, dist, home } = repo();
+    const { repo: r, dist } = repo();
     ensureTraecodeWorkspaceMcp(homedir(), { dist });
     ensureTraecodeWorkspaceMcp("/", { dist });
     ensureTraecodeWorkspaceMcp("relative/path", { dist });
@@ -135,7 +151,7 @@ describe("ensureTraecodeWorkspaceMcp", () => {
   });
 
   it("does nothing when the dist has no mcp-server.js (unbuilt tree)", () => {
-    const { repo: r, home } = repo();
+    const { repo: r } = repo();
     const empty = tmp("traecode-mcp-empty-");
     ensureTraecodeWorkspaceMcp(r, { dist: empty });
     expect(existsSync(mcpFile(r))).toBe(false);
@@ -256,5 +272,151 @@ describe("workspace-MCP gate", () => {
         /enableWorkspaceMcp/
       );
     });
+  });
+});
+
+// ── the per-workspace enable switch (workspaceStorage state.vscdb) ────────────────────────────
+
+describe("workspace enable switch seed", () => {
+  const dirs: string[] = [];
+  const tmp = (p: string) => {
+    const d = mkdtempSync(join(tmpdir(), `traecode-enable-${p}`));
+    dirs.push(d);
+    return d;
+  };
+  afterEach(() => {
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
+  /** A fake HOME whose Trae CN userData carries one workspaceStorage entry for `repo`, with an
+   *  ItemTable pre-seeded via (key, value) pairs. Returns the DB path. */
+  const homeWithWorkspace = (repo: string, rows: [string, string][] = []) => {
+    const home = tmp("home-");
+    const ws = join(home, "Library", "Application Support", "Trae CN", "User", "workspaceStorage", "hash1");
+    mkdirSync(ws, { recursive: true });
+    writeFileSync(join(ws, "workspace.json"), JSON.stringify({ folder: pathToFileURL(repo).href }));
+    const db = join(ws, "state.vscdb");
+    execFileSync("sqlite3", [
+      db,
+      "CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB);",
+      ...rows.map(([k, v]) => `INSERT OR REPLACE INTO ItemTable (key, value) VALUES ('${k}', '${v}');`),
+    ]);
+    return { home, db };
+  };
+  const query = (db: string, key: string) =>
+    execFileSync("sqlite3", [db, `SELECT value FROM ItemTable WHERE key='${key}';`], {
+      encoding: "utf8",
+    }).trim();
+
+  it.runIf(hasSqlite3)("seeds the switch in the matching workspace's DB, then reports on", () => {
+    const repo = tmp("repo-");
+    const { home, db } = homeWithWorkspace(repo, [["some.other.key", "1"]]);
+    expect(ensureWorkspaceMcpEnabled(repo, { home })).toBe("seeded");
+    expect(query(db, traecodeWorkspaceEnabledKey())).toBe("true");
+    expect(query(db, "some.other.key")).toBe("1"); // the rest of the table is untouched
+    expect(ensureWorkspaceMcpEnabled(repo, { home })).toBe("on"); // idempotent skip
+  });
+
+  it.runIf(hasSqlite3)("matches the repo by its file:// URL only", () => {
+    const { home } = homeWithWorkspace(tmp("other-"));
+    expect(ensureWorkspaceMcpEnabled(tmp("unrelated-"), { home })).toBe("failed");
+  });
+
+  it.runIf(hasSqlite3)("fails (and does not throw) when the DB is unreadable", () => {
+    const repo = tmp("repo-");
+    const { home, db } = homeWithWorkspace(repo);
+    writeFileSync(db, "this is not a database"); // sqlite3 errors on open/query
+    expect(ensureWorkspaceMcpEnabled(repo, { home })).toBe("failed");
+  });
+
+  it("fails without any workspaceStorage entry for the repo", () => {
+    const repo = tmp("repo-");
+    expect(ensureWorkspaceMcpEnabled(repo, { home: tmp("home-") })).toBe("failed");
+  });
+});
+
+describe("workspaceEnableHint", () => {
+  const dirs: string[] = [];
+  const tmp = (p: string) => {
+    const d = mkdtempSync(join(tmpdir(), `traecode-enablehint-${p}`));
+    dirs.push(d);
+    return d;
+  };
+  afterEach(() => {
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+  const stateFile = (dir: string) => join(dir, "state.json");
+
+  it("hints at most once a day, on its own rate-limit field", () => {
+    const state = stateFile(tmp("s-"));
+    expect(workspaceEnableHint({ stateFile: state, now: 1_000 })).toMatch(/MCP panel/);
+    expect(workspaceEnableHint({ stateFile: state, now: 2_000 })).toBeUndefined();
+    expect(workspaceEnableHint({ stateFile: state, now: 86_500_000 })).toMatch(/MCP panel/);
+    const saved = JSON.parse(readFileSync(state, "utf8"));
+    expect(saved.lastEnableHint).toBe(86_500_000);
+    expect(saved.lastHint).toBeUndefined(); // independent of the gate hint's field
+  });
+});
+
+describe("ensureTraecodeWorkspaceMcp hint selection", () => {
+  const dirs: string[] = [];
+  const tmp = (p: string) => {
+    const d = mkdtempSync(join(tmpdir(), `traecode-select-${p}`));
+    dirs.push(d);
+    return d;
+  };
+  afterEach(() => {
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+  const stateFile = (dir: string) => join(dir, "state.json");
+  const homeWithSettings = (content: string) => {
+    const home = tmp("home-");
+    const settings = traecodeUserSettingsPath(home);
+    mkdirSync(dirname(settings), { recursive: true });
+    writeFileSync(settings, content);
+    return home;
+  };
+  const dist = () => {
+    const d = tmp("dist-");
+    writeFileSync(join(d, "mcp-server.js"), "// stub");
+    return d;
+  };
+
+  it("gate hint wins while the global gate is off", () => {
+    const home = homeWithSettings("{}"); // gate off, seed will also fail (no storage)
+    const hint = ensureTraecodeWorkspaceMcp(tmp("repo-"), {
+      home,
+      dist: dist(),
+      stateFile: stateFile(tmp("s-")),
+    });
+    expect(hint).toMatch(/enableWorkspaceMcp/); // the FIRST blocker, not the panel switch
+  });
+
+  it("the enable hint appears once the gate is on but the switch could not be seeded", () => {
+    const home = homeWithSettings('{"trae.mcp.enableWorkspaceMcp":true}');
+    const hint = ensureTraecodeWorkspaceMcp(tmp("repo-"), {
+      home,
+      dist: dist(),
+      stateFile: stateFile(tmp("s-")),
+    });
+    expect(hint).toMatch(/MCP panel/);
+  });
+
+  it.runIf(hasSqlite3)("silent when the gate is on and the seed succeeds", () => {
+    const repo = tmp("repo-");
+    const home = homeWithSettings('{"trae.mcp.enableWorkspaceMcp":true}');
+    const ws = join(home, "Library", "Application Support", "Trae CN", "User", "workspaceStorage", "hash1");
+    mkdirSync(ws, { recursive: true });
+    writeFileSync(join(ws, "workspace.json"), JSON.stringify({ folder: pathToFileURL(repo).href }));
+    execFileSync("sqlite3", [
+      join(ws, "state.vscdb"),
+      "CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB);",
+    ]);
+    const hint = ensureTraecodeWorkspaceMcp(repo, {
+      home,
+      dist: dist(),
+      stateFile: stateFile(tmp("s-")),
+    });
+    expect(hint).toBeUndefined();
   });
 });

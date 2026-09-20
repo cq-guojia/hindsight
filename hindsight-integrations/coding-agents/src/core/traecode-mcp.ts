@@ -24,7 +24,8 @@
  * line that keeps it out of version control — but only when a .gitignore already exists: creating
  * one is a bigger statement about the repo than a hook should make.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -107,7 +108,7 @@ function gateStateFile(): string {
   return join(dirname(bundledDistDir()), ".workspace-mcp.json");
 }
 
-type GateState = { workspaceMcpEnabled?: boolean; lastHint?: number };
+type GateState = { workspaceMcpEnabled?: boolean; lastHint?: number; lastEnableHint?: number };
 type GateStateOpts = { stateFile?: string };
 
 function readGateState(opts: GateStateOpts = {}): GateState {
@@ -221,15 +222,17 @@ function ensureGitignored(repo: string): void {
   writeFileSync(gitignore, current + addition);
 }
 
-/** Ensure `<repo>/.trae/mcp.json` registers the hindsight MCP server for THIS repo, then report
- *  the workspace-MCP gate: the registration only matters once `trae.mcp.enableWorkspaceMcp` is
- *  on, so the returned hint (or undefined) rides the session banner. Never throws. */
+/** Ensure `<repo>/.trae/mcp.json` registers the hindsight MCP server for THIS repo, seed the
+ *  workspace's per-server enable switch (below), then report whichever blocker still hides the
+ *  tools: the global workspace-MCP gate first, else a seed failure. undefined = nothing to say.
+ *  Never throws. */
 export function ensureTraecodeWorkspaceMcp(
   cwd: string,
-  opts: { home?: string; dist?: string } = {}
+  opts: { home?: string; dist?: string; stateFile?: string } = {}
 ): string | undefined {
   registerTraecodeWorkspaceMcp(cwd, opts);
-  return workspaceMcpHint(opts);
+  const seeded = ensureWorkspaceMcpEnabled(cwd, opts);
+  return workspaceMcpHint(opts) ?? (seeded === "failed" ? workspaceEnableHint(opts) : undefined);
 }
 
 /** The registration itself — merge-not-clobber, foreign entries untouched, idempotent. Never
@@ -293,5 +296,123 @@ function registerTraecodeWorkspaceMcp(cwd: string, opts: { home?: string; dist?:
       cwd,
       error: e instanceof Error ? e.message : String(e),
     });
+  }
+}
+
+// ── the per-workspace enable switch (workspaceStorage state.vscdb) ────────────────────────────
+//
+// Even with the gate on and the registration in place, Trae starts a workspace-level MCP server
+// only when ITS OWN switch for this window is on — and that switch defaults to off, persisted in
+// the window's storage DB: `<userData>/User/workspaceStorage/<hash>/state.vscdb`, ItemTable key
+// `icubeAgentExtension.enabled.mcp.config.ws0.<server>` (ws0 = the single root folder), value the
+// TEXT "true" that Trae's MCP panel writes when someone flips it by hand. Flipping by hand per
+// repo is exactly the manual step this integration must not have, so the SessionStart hook writes
+// the key itself: find the storage dir whose workspace.json points at this repo, and set it when
+// it is not already "true". Verified against a live Trae CN install (key absent → tools hidden;
+// panel toggle → TEXT "true" in that row). Effect starts with the NEXT window — Trae holds the
+// table in memory for the running one — which matches when the registration lands anyway.
+
+const WORKSPACE_STORAGE_REL = join("User", "workspaceStorage");
+const ENABLED_KEY_PREFIX = "icubeAgentExtension.enabled.mcp.config.ws0.";
+const SQLITE_TIMEOUT_MS = 5_000;
+
+/** The ItemTable key Trae persists for this server's per-workspace switch. Exported for the
+ *  installer's uninstall sweep, which removes the keys the hook seeded. */
+export const traecodeWorkspaceEnabledKey = (): string => ENABLED_KEY_PREFIX + MCP_SERVER_NAME;
+
+/** The storage dir whose workspace.json points at `repo`, or undefined. Non-folder entries
+ *  (multi-root `.code-workspace` windows, half-written dirs) are skipped: for those the switch
+ *  stays manual, and the caller's hint says where it lives. */
+function findWorkspaceStorageDir(storage: string, repo: string): string | undefined {
+  let entries: string[];
+  try {
+    entries = readdirSync(storage);
+  } catch {
+    return undefined; // no workspaceStorage yet (or a sandbox denying the read)
+  }
+  for (const name of entries) {
+    try {
+      const doc = JSON.parse(readFileSync(join(storage, name, "workspace.json"), "utf8")) as {
+        folder?: string;
+      };
+      if (typeof doc.folder !== "string") continue;
+      let folder: string;
+      try {
+        folder = fileURLToPath(doc.folder);
+      } catch {
+        folder = doc.folder; // tolerate a plain path, though Trae writes file:// URLs
+      }
+      if (folder === repo) return join(storage, name);
+    } catch {
+      continue; // unreadable workspace.json: somebody else's storage entry
+    }
+  }
+  return undefined;
+}
+
+/** Seed this workspace's enable switch. "on" = already enabled (idempotent skip), "seeded" =
+ *  written this call, "failed" = no storage entry for this repo / sqlite3 unavailable / DB
+ *  locked — the caller hints instead. Never throws. */
+export function ensureWorkspaceMcpEnabled(
+  cwd: string,
+  opts: { home?: string; sqlite?: typeof execFileSync } = {}
+): "on" | "seeded" | "failed" {
+  try {
+    const home = opts.home ?? homedir();
+    // Same guard as the registration: home/root/relative cwds are not Trae workspaces.
+    if (!cwd || !isAbsolute(cwd) || dirname(cwd) === cwd || cwd === home) return "failed";
+    const dir = findWorkspaceStorageDir(join(traecodeUserDataDir(home), WORKSPACE_STORAGE_REL), cwd);
+    if (!dir) return "failed";
+    const db = join(dir, "state.vscdb");
+    if (!existsSync(db)) return "failed";
+    const sqlite = opts.sqlite ?? execFileSync;
+    const run = (sql: string): string =>
+      sqlite(
+        "sqlite3",
+        [db, ".timeout 3000", sql],
+        { encoding: "utf8", timeout: SQLITE_TIMEOUT_MS, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] } as const
+      ).trim();
+    if (run(`SELECT value FROM ItemTable WHERE key='${traecodeWorkspaceEnabledKey()}';`) === "true") {
+      return "on";
+    }
+    run(
+      `INSERT OR REPLACE INTO ItemTable (key, value) VALUES ('${traecodeWorkspaceEnabledKey()}', 'true');`
+    );
+    diag("traecode", "workspace_mcp_enabled_seeded", { cwd, db });
+    return "seeded";
+  } catch (e) {
+    diag("traecode", "workspace_mcp_enabled_seed_failed", {
+      cwd,
+      error: e instanceof Error ? e.message : String(e),
+    });
+    return "failed";
+  }
+}
+
+/** The fallback hint when the enable switch could not be seeded: it lives in Trae's MCP panel.
+ *  At most once a day (its own rate-limit field), like the gate hint. undefined = silent. Never
+ *  throws. */
+export function workspaceEnableHint(
+  opts: { home?: string; now?: number; stateFile?: string } = {}
+): string | undefined {
+  try {
+    const now = opts.now ?? Date.now();
+    const state = readGateState(opts);
+    if (
+      typeof state.lastEnableHint === "number" &&
+      now - state.lastEnableHint < HINT_MIN_INTERVAL_MS
+    ) {
+      return undefined;
+    }
+    writeFileSync(
+      opts.stateFile ?? gateStateFile(),
+      JSON.stringify({ ...state, lastEnableHint: now }, null, 2) + "\n"
+    );
+    return (
+      "Hindsight's MCP server stays disabled in this window: auto-enabling it failed here. " +
+      "Switch hindsight on for this workspace in Trae's MCP panel, then reload the window."
+    );
+  } catch {
+    return undefined; // a hint must never break the session it rides
   }
 }

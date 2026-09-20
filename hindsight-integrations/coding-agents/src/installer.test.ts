@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { execFileSync } from "node:child_process";
 import {
   mkdirSync,
   mkdtempSync,
@@ -12,8 +13,20 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { INSTALLERS, MARKER, parseJsonc, run, type InstallCtx } from "./installer";
+import { traecodeWorkspaceEnabledKey } from "./core/traecode-mcp";
 import { SKILL_DIRS } from "./core/skill-dirs";
 import { parse as parseToml } from "smol-toml";
+
+/** The uninstall sweep and the hook seed both shell out to the system sqlite3 — absent on some
+ *  runners, so the DB-backed tests gate on a probe instead of assuming. */
+const hasSqlite3 = (() => {
+  try {
+    execFileSync("sqlite3", ["--version"], { stdio: ["ignore", "pipe", "pipe"] });
+    return true;
+  } catch {
+    return false;
+  }
+})();
 
 // Every test gets a FRESH temp dir as ctx.home (never the real $HOME) and a stubbed
 // claudeMcp so the real `claude` CLI is never executed. run() is always called with
@@ -592,17 +605,20 @@ describe("zcode installer", () => {
 
 describe("traecode installer", () => {
   const hooksPath = (ctx: InstallCtx) => join(ctx.home, ".trae-cn", "hooks.json");
-  // Mirrors traecodeMcpPath's root choice. The env vars it consults are cleared for the whole
+  // Mirrors traecodeUserDataDir's root choice. The env vars it consults are cleared for the whole
   // file (see the top-level beforeAll) so the resolution lands inside the temp home everywhere.
-  const mcpPath = (ctx: InstallCtx) => {
-    const root =
+  const userDataRoot = (ctx: InstallCtx) => {
+    const base =
       process.platform === "darwin"
         ? join(ctx.home, "Library", "Application Support")
         : process.platform === "win32"
           ? join(ctx.home, "AppData", "Roaming")
           : join(ctx.home, ".config");
-    return join(root, "Trae CN", "User", "mcp.json");
+    return join(base, "Trae CN");
   };
+  const mcpPath = (ctx: InstallCtx) => join(userDataRoot(ctx), "User", "mcp.json");
+  const wsStorageDir = (ctx: InstallCtx, name: string) =>
+    join(userDataRoot(ctx), "User", "workspaceStorage", name);
 
   it("registers the three hooks under the hooks key of ~/.trae-cn/hooks.json, in Claude's nested shape", () => {
     // TraeCode reads the event map from the top-level `hooks` KEY (Claude Code's settings.json
@@ -671,23 +687,56 @@ describe("traecode installer", () => {
     expect(existsSync(mcpPath(ctx))).toBe(false);
   });
 
-  it("registers the stdio MCP server in the userData mcp.json, tagged with the traecode harness", () => {
+  it("writes no user-level MCP registration — the per-repo hook-written file is the only one", () => {
+    // Trae launches user-level servers with the Electron cwd (home), so a registration there is
+    // wrong in every configuration (see installer.ts); the SessionStart hook writes each repo's
+    // `.trae/mcp.json` instead.
     const ctx = makeCtx();
     expect(run(["install", "traecode"], ctx)).toBe(0);
-    const server = readJson(mcpPath(ctx)).mcpServers.hindsight;
-    expect(server).toMatchObject({ command: "node", env: { HINDSIGHT_MCP_HARNESS: "traecode" } });
-    expect(server.args[0]).toContain("mcp-server.js");
+    expect(existsSync(mcpPath(ctx))).toBe(false);
+  });
+
+  it("migrates a stale user-level MCP entry away on install", () => {
+    const ctx = makeCtx();
+    // An entry only the real package layout satisfies (isOurMcpEntry checks the path shape).
+    const stale = {
+      command: "node",
+      args: [join(ctx.home, "vendor", "coding-agents", "dist", "mcp-server.js")],
+      env: { HINDSIGHT_MCP_HARNESS: "traecode" },
+    };
+    writeJsonAt(mcpPath(ctx), { mcpServers: { hindsight: stale } });
+    expect(run(["install", "traecode"], ctx)).toBe(0);
+    expect(existsSync(mcpPath(ctx))).toBe(false); // nothing else in the file: remove it whole
+  });
+
+  it("migrates only our entry, keeping foreign servers in the user-level file", () => {
+    const ctx = makeCtx();
+    const stale = {
+      command: "node",
+      args: [join(ctx.home, "vendor", "coding-agents", "dist", "mcp-server.js")],
+      env: { HINDSIGHT_MCP_HARNESS: "traecode" },
+    };
+    writeJsonAt(mcpPath(ctx), {
+      mcpServers: { hindsight: stale, playwright: { command: "npx" } },
+    });
+    expect(run(["install", "traecode"], ctx)).toBe(0);
+    const mcp = readJson(mcpPath(ctx));
+    expect(mcp.mcpServers.playwright).toEqual({ command: "npx" });
+    expect(mcp.mcpServers.hindsight).toBeUndefined();
   });
 
   const sandboxPath = (ctx: InstallCtx) => join(ctx.home, ".trae-cn", "sandbox.json");
 
-  it("seeds a sandbox readWrite rule for ~/.hindsight — hooks run inside TraeCode's sandbox", () => {
+  it("seeds sandbox readWrite rules for ~/.hindsight and Trae's workspace storage — hooks run sandboxed", () => {
     const ctx = makeCtx();
     expect(run(["install", "traecode"], ctx)).toBe(0);
-    expect(readJson(sandboxPath(ctx)).filesystem.readWrite).toEqual([join(ctx.home, ".hindsight")]);
+    expect(readJson(sandboxPath(ctx)).filesystem.readWrite).toEqual([
+      join(ctx.home, ".hindsight"),
+      join(userDataRoot(ctx), "User", "workspaceStorage"),
+    ]);
   });
 
-  it("merges the sandbox rule without disturbing foreign rules, and never stacks duplicates", () => {
+  it("merges the sandbox rules without disturbing foreign rules, and never stacks duplicates", () => {
     const ctx = makeCtx();
     writeJsonAt(sandboxPath(ctx), {
       filesystem: { readWrite: ["/opt/other-tool"], readOnly: ["/etc"] },
@@ -695,12 +744,12 @@ describe("traecode installer", () => {
     expect(run(["install", "traecode"], ctx)).toBe(0);
     expect(run(["install", "traecode"], ctx)).toBe(0);
     expect(readJson(sandboxPath(ctx)).filesystem).toEqual({
-      readWrite: ["/opt/other-tool", join(ctx.home, ".hindsight")],
+      readWrite: ["/opt/other-tool", join(ctx.home, ".hindsight"), join(userDataRoot(ctx), "User", "workspaceStorage")],
       readOnly: ["/etc"],
     });
   });
 
-  it("uninstall removes our sandbox rule and keeps foreign ones", () => {
+  it("uninstall removes our sandbox rules and keeps foreign ones", () => {
     const ctx = makeCtx();
     expect(run(["install", "traecode"], ctx)).toBe(0);
     expect(run(["uninstall", "traecode"], ctx)).toBe(0);
@@ -716,15 +765,17 @@ describe("traecode installer", () => {
     expect(existsSync(join(ctx.home, ".trae-cn"))).toBe(false);
   });
 
-  it("refuses to overwrite a user-managed MCP server already named hindsight", () => {
+  it("keeps a foreign user-level hindsight entry and still installs — the installer writes no MCP file", () => {
     const ctx = makeCtx();
     writeJsonAt(mcpPath(ctx), {
       mcpServers: { hindsight: { command: "their-own-proxy", args: ["serve"] } },
     });
-    expect(run(["install", "traecode"], ctx)).not.toBe(0);
-    expect(readJson(mcpPath(ctx)).mcpServers.hindsight.command).toBe("their-own-proxy");
-    // Nothing was written: a doomed setup fails before touching any config.
-    expect(existsSync(hooksPath(ctx))).toBe(false);
+    expect(run(["install", "traecode"], ctx)).toBe(0);
+    expect(readJson(mcpPath(ctx)).mcpServers.hindsight).toEqual({
+      command: "their-own-proxy",
+      args: ["serve"],
+    });
+    expect(readJson(hooksPath(ctx)).hooks.SessionStart).toHaveLength(1);
   });
 
   it("uninstall removes our MCP entry and keeps a foreign server", () => {
@@ -738,6 +789,36 @@ describe("traecode installer", () => {
     expect(mcp.mcpServers.playwright).toBeDefined();
     expect(mcp.mcpServers.hindsight).toBeUndefined();
   });
+
+  it.runIf(hasSqlite3)(
+    "uninstall removes the workspace enable switches the hook seeded, and only those",
+    () => {
+      const ctx = makeCtx();
+      const ws = wsStorageDir(ctx, "abc123");
+      mkdirSync(ws, { recursive: true });
+      writeFileSync(
+        join(ws, "workspace.json"),
+        JSON.stringify({ folder: pathToFileURL(join(ctx.home, "somewhere")).href })
+      );
+      const db = join(ws, "state.vscdb");
+      execFileSync("sqlite3", [
+        db,
+        "CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB);",
+        `INSERT OR REPLACE INTO ItemTable (key, value) VALUES ('${traecodeWorkspaceEnabledKey()}', 'true');`,
+        "INSERT OR REPLACE INTO ItemTable (key, value) VALUES ('some.other.key', '1');",
+      ]);
+      expect(run(["install", "traecode"], ctx)).toBe(0);
+      expect(run(["uninstall", "traecode"], ctx)).toBe(0);
+      const query = (key: string) =>
+        execFileSync(
+          "sqlite3",
+          [db, `SELECT value FROM ItemTable WHERE key='${key}';`],
+          { encoding: "utf8" }
+        ).trim();
+      expect(query(traecodeWorkspaceEnabledKey())).toBe("");
+      expect(query("some.other.key")).toBe("1");
+    }
+  );
 
   /** makeCtx's pkgRoot is a synthetic /opt path the test cannot write; stage the packaged skill in
    *  a real temp package root, like the zcode and droid tests do. */
@@ -1805,11 +1886,13 @@ describe("MCP registrations name the calling harness", () => {
     );
   }
 
-  // These hosts have no MCP registration at all: they load our plugin/extension in-process
-  // (src/kilo.ts, src/dsh.ts, src/pi.ts, src/prime-agent.ts, dist/index.js for opencode,
-  // index.js -> dist/opencode2.js for opencode2), and that entry hands its own harness name
-  // straight to RuntimeCore.
-  const IN_PROCESS = new Set([
+  // These hosts have no INSTALLER-written MCP registration. The in-process ones load our
+  // plugin/extension in-process (src/kilo.ts, src/dsh.ts, src/pi.ts, src/prime-agent.ts,
+  // dist/index.js for opencode, index.js -> dist/opencode2.js for opencode2), and that entry
+  // hands its own harness name straight to RuntimeCore. TraeCode's registration is per-repo
+  // `<repo>/.trae/mcp.json`, written by the SessionStart hook (covered in core/traecode-mcp.test.ts)
+  // — the installer deliberately writes no user-level MCP file (see installer.ts's traecode docs).
+  const NO_INSTALLER_MCP = new Set([
     "opencode",
     "opencode2",
     "kilo",
@@ -1817,8 +1900,9 @@ describe("MCP registrations name the calling harness", () => {
     "prime-agent",
     "dsh",
     "dcode",
+    "traecode",
   ]);
-  const MCP_HOSTS = INSTALLERS.map((i) => i.name).filter((n) => !IN_PROCESS.has(n));
+  const MCP_HOSTS = INSTALLERS.map((i) => i.name).filter((n) => !NO_INSTALLER_MCP.has(n));
 
   it.each(MCP_HOSTS)("%s", (harness) => {
     const ctx = makeCtx();
