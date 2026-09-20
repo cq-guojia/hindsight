@@ -937,7 +937,11 @@ describe("traecode installer", () => {
     expect(run(["install", "traecode"], ctx)).toBe(0);
     expect(run(["install", "traecode"], ctx)).toBe(0);
     expect(readJson(sandboxPath(ctx)).filesystem).toEqual({
-      readWrite: ["/opt/other-tool", join(ctx.home, ".hindsight"), join(userDataRoot(ctx), "User", "workspaceStorage")],
+      readWrite: [
+        "/opt/other-tool",
+        join(ctx.home, ".hindsight"),
+        join(userDataRoot(ctx), "User", "workspaceStorage"),
+      ],
       readOnly: ["/etc"],
     });
   });
@@ -1003,11 +1007,9 @@ describe("traecode installer", () => {
       expect(run(["install", "traecode"], ctx)).toBe(0);
       expect(run(["uninstall", "traecode"], ctx)).toBe(0);
       const query = (key: string) =>
-        execFileSync(
-          "sqlite3",
-          [db, `SELECT value FROM ItemTable WHERE key='${key}';`],
-          { encoding: "utf8" }
-        ).trim();
+        execFileSync("sqlite3", [db, `SELECT value FROM ItemTable WHERE key='${key}';`], {
+          encoding: "utf8",
+        }).trim();
       expect(query(traecodeWorkspaceEnabledKey())).toBe("");
       expect(query("some.other.key")).toBe("1");
     }

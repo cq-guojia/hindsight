@@ -276,9 +276,13 @@ describe("workspace-MCP gate", () => {
     it("hints when the gate reads off, at most once a day", () => {
       const { home } = homeWithSettings("{}");
       const state = stateFile(tmp("s-"));
-      expect(workspaceMcpHint({ home, stateFile: state, now: 1_000 })).toMatch(/enableWorkspaceMcp/);
+      expect(workspaceMcpHint({ home, stateFile: state, now: 1_000 })).toMatch(
+        /enableWorkspaceMcp/
+      );
       expect(workspaceMcpHint({ home, stateFile: state, now: 2_000 })).toBeUndefined();
-      expect(workspaceMcpHint({ home, stateFile: state, now: 86_500_000 })).toMatch(/enableWorkspaceMcp/);
+      expect(workspaceMcpHint({ home, stateFile: state, now: 86_500_000 })).toMatch(
+        /enableWorkspaceMcp/
+      );
       expect(JSON.parse(readFileSync(state, "utf8")).lastHint).toBe(86_500_000);
     });
 
@@ -322,7 +326,9 @@ describe("workspace enable switch seed", () => {
     execFileSync("sqlite3", [
       db,
       "CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB);",
-      ...rows.map(([k, v]) => `INSERT OR REPLACE INTO ItemTable (key, value) VALUES ('${k}', '${v}');`),
+      ...rows.map(
+        ([k, v]) => `INSERT OR REPLACE INTO ItemTable (key, value) VALUES ('${k}', '${v}');`
+      ),
     ]);
     return { home, db };
   };
