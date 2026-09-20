@@ -30,6 +30,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   readSync,
   realpathSync,
   rmSync,
@@ -51,6 +52,7 @@ import {
   markWorkspaceMcpEnabled,
   traecodeUserDataDir,
   traecodeUserSettingsPath,
+  traecodeWorkspaceEnabledKey,
   workspaceMcpGateState,
 } from "./core/traecode-mcp";
 import { formatUsageReport, readUsage } from "./core/usage";
@@ -2006,27 +2008,54 @@ const codebuddy: HarnessInstaller = {
  *   nests the event map under a top-level `hooks` key (Claude's settings.json shape), NOT at the
  *   top level the way Droid's hooks.json is read. The host also writes and expects a top-level
  *   `version` field, so the installer seeds it at 1 when absent and leaves it alone otherwise.
- * - `mcp.json` - `mcpServers.hindsight` runs the same stdio `dist/mcp-server.js` as every other
- *   host, tagged `HINDSIGHT_MCP_HARNESS=traecode`. A same-named foreign server blocks install
- *   instead of being overwritten. Unlike the files above, this one is NOT under `~/.trae-cn` —
- *   TraeCode reads user-level MCP from its Electron userData dir (see traecodeMcpPath).
  * - `skills/` - the companion skill, in TraeCode's own user-level root (see SKILL_DIRS).
- * - `sandbox.json` - one `filesystem.readWrite` rule for `~/.hindsight`: hooks execute inside
- *   TraeCode's sandbox, and without the rule they fail silently (verified on a live install).
+ * - `sandbox.json` - `filesystem.readWrite` rules for `~/.hindsight` (logs, config — without them
+ *   the hooks fail silently, verified on a live install) and for Trae's per-window storage DBs
+ *   (`<userData>/User/workspaceStorage`), which the SessionStart hook seeds with the workspace's
+ *   MCP enable switch (core/traecode-mcp.ts).
+ *
+ * Deliberately NOT touched: the user-level MCP file (`<userData>/User/mcp.json`). Trae launches
+ * user-level servers with the ELECTRON process's cwd (home), so a hindsight entry there is wrong
+ * in every configuration — with `optInOnly` it self-disables (zero tools), without it the tools
+ * resolve the HOME bank instead of the repo's. The only correct registration is per-repo
+ * `<repo>/.trae/mcp.json`, which the SessionStart hook maintains (core/traecode-mcp.ts); install
+ * migrates a stale user-level entry left by earlier versions away (ours only — a foreign
+ * `hindsight` entry is the user's own server and is never touched).
  *
  * TraeCode keeps sessions in an encrypted local DB or the cloud — there is no transcript file — so
  * the journal-based lifecycle (see HOOK_HARNESSES.traecode) is the whole write-back path.
  */
 /**
  * TRAE splits its config across two roots: a dot-dir holding hooks.json/sandbox.json (and the
- * skills root), and the app's Electron userData dir holding the user-level MCP file
- * (`<userData>/User/mcp.json`, following VSCode-fork OS conventions — a `~/.trae-cn/mcp.json` is
- * never read). Both roots are edition-branded: the CN build uses `~/.trae-cn` / "Trae CN", the
- * international build `~/.trae` / "Trae", so every path resolves by probing for the brand dir that
- * actually exists and falling back to the CN names (see traecodeDotDir / traecodeMcpPath).
+ * skills root), and the app's Electron userData dir holding per-window storage (`User/
+ * workspaceStorage`; a `~/.trae-cn/mcp.json` is never read). Both roots are edition-branded: the
+ * CN build uses `~/.trae-cn` / "Trae CN", the international build `~/.trae` / "Trae", so every
+ * path resolves by probing for the brand dir that actually exists and falling back to the CN
+ * names (see traecodeDotDir / traecodeUserDataDir).
  */
 const traecodeMcpPath = (c: InstallCtx): string =>
   join(traecodeUserDataDir(c.home), "User", "mcp.json");
+const traecodeWorkspaceStorage = (c: InstallCtx): string =>
+  join(traecodeUserDataDir(c.home), "User", "workspaceStorage");
+
+/** Remove OUR stale user-level MCP entry from `<userData>/User/mcp.json` (see the harness docs
+ *  for why it must not exist), leaving foreign entries and the rest of the document alone, and
+ *  deleting the file when nothing but our entry was in it. Returns whether anything was removed.
+ *  Never throws. */
+function removeTraecodeUserMcpEntry(c: InstallCtx): boolean {
+  try {
+    const mcpPath = traecodeMcpPath(c);
+    if (!existsSync(mcpPath)) return false;
+    const mcp = readJson(mcpPath);
+    if (!isOurMcpEntry(mcp.mcpServers?.hindsight)) return false;
+    delete mcp.mcpServers.hindsight;
+    if (Object.keys(mcp.mcpServers).length) writeJson(mcpPath, mcp);
+    else rmSync(mcpPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Trae gates workspace-level MCP files behind `trae.mcp.enableWorkspaceMcp` (global, default
@@ -2074,16 +2103,6 @@ function ensureTraecodeWorkspaceMcpGate(c: InstallCtx): void {
 const traecode: HarnessInstaller = {
   name: "traecode",
   detect: (c) => existsSync(join(c.home, traecodeDotDirName(c.home))) || onPath("trae"),
-  preflight(c) {
-    const mcpPath = traecodeMcpPath(c);
-    const existing = readJson(mcpPath).mcpServers?.hindsight;
-    if (existing && !isOurMcpEntry(existing)) {
-      return (
-        `${mcpPath} already contains a user-managed MCP server named "hindsight". ` +
-        "Rename or remove that entry, then re-run install."
-      );
-    }
-  },
   install(c) {
     const hooksPath = join(c.home, traecodeDotDirName(c.home), "hooks.json");
     const doc = readJson(hooksPath);
@@ -2094,26 +2113,37 @@ const traecode: HarnessInstaller = {
     c.log?.(`traecode: hooks merged into ${hooksPath}`);
     installSkill(c, "traecode");
 
-    const mcpPath = traecodeMcpPath(c);
-    const mcp = readJson(mcpPath);
-    mcp.mcpServers = mcp.mcpServers ?? {};
-    mcp.mcpServers.hindsight = mcpServerEntry(c.dist, "traecode");
-    writeJson(mcpPath, mcp);
-    c.log?.(`traecode: MCP server registered in ${mcpPath}`);
+    // Migration: installs before 2026-09 registered the MCP server at the user level, where
+    // Trae's home-directory cwd breaks it (see the harness docs). The per-repo `.trae/mcp.json`
+    // the SessionStart hook maintains is the only registration — drop the stale entry.
+    if (removeTraecodeUserMcpEntry(c)) {
+      c.log?.(
+        `traecode: stale user-level MCP entry removed from ${traecodeMcpPath(c)} — per-repo\n` +
+          "  .trae/mcp.json files register the server instead (written by the SessionStart hook)"
+      );
+    }
 
     // TraeCode runs every hook inside its sandbox; the profile is generated per session from the
     // defaults plus the user's `~/.trae-cn/sandbox.json` rules. The defaults cover network and the
     // journal's tmpdir but NOT `~/.hindsight` (logs, config), so without this rule the hooks fail
     // silently (exit 0, zero effect) and the only workaround would be running hooks unsandboxed.
+    // The per-window storage DBs get the same treatment: the SessionStart hook seeds the
+    // workspace's MCP enable switch there (core/traecode-mcp.ts).
     const sandboxPath = join(c.home, traecodeDotDirName(c.home), "sandbox.json");
     const sandbox = readJson(sandboxPath);
     const fsRules = (sandbox.filesystem = sandbox.filesystem ?? {});
     const readWrite = (fsRules.readWrite = fsRules.readWrite ?? []);
-    const hindsightHome = join(c.home, ".hindsight");
-    if (!readWrite.includes(hindsightHome)) {
-      readWrite.push(hindsightHome);
+    const needed = [join(c.home, ".hindsight"), traecodeWorkspaceStorage(c)];
+    let sandboxChanged = false;
+    for (const dir of needed) {
+      if (!readWrite.includes(dir)) {
+        readWrite.push(dir);
+        sandboxChanged = true;
+      }
+    }
+    if (sandboxChanged) {
       writeJson(sandboxPath, sandbox);
-      c.log?.(`traecode: sandbox readWrite rule added for ${hindsightHome}`);
+      c.log?.(`traecode: sandbox readWrite rules added (${needed.join(", ")})`);
     }
 
     ensureTraecodeWorkspaceMcpGate(c);
@@ -2131,26 +2161,41 @@ const traecode: HarnessInstaller = {
       if (Object.keys(doc).length > 1) writeJson(hooksPath, doc);
       else rmSync(hooksPath);
     }
-    const mcpPath = traecodeMcpPath(c);
-    if (existsSync(mcpPath)) {
-      const mcp = readJson(mcpPath);
-      if (isOurMcpEntry(mcp.mcpServers?.hindsight)) {
-        delete mcp.mcpServers.hindsight;
-        if (Object.keys(mcp.mcpServers).length) writeJson(mcpPath, mcp);
-        else rmSync(mcpPath);
-      }
+    if (removeTraecodeUserMcpEntry(c)) {
+      c.log?.(`traecode: MCP entry removed from ${traecodeMcpPath(c)}`);
     }
     const sandboxPath = join(c.home, traecodeDotDirName(c.home), "sandbox.json");
     if (existsSync(sandboxPath)) {
       const sandbox = readJson(sandboxPath);
       const readWrite = sandbox.filesystem?.readWrite;
       if (Array.isArray(readWrite)) {
-        const filtered = readWrite.filter((p: unknown) => p !== join(c.home, ".hindsight"));
+        const ours = [join(c.home, ".hindsight"), traecodeWorkspaceStorage(c)];
+        const filtered = readWrite.filter((p: string) => !ours.includes(p));
         if (filtered.length !== readWrite.length) {
           sandbox.filesystem.readWrite = filtered;
           writeJson(sandboxPath, sandbox);
         }
       }
+    }
+    // The per-workspace enable switches the hook seeded are ours by key name — remove them so an
+    // uninstall leaves no storage behind. Best-effort: locked or absent DBs skip silently.
+    try {
+      const storage = traecodeWorkspaceStorage(c);
+      for (const name of existsSync(storage) ? readdirSync(storage) : []) {
+        const db = join(storage, name, "state.vscdb");
+        if (!existsSync(db)) continue; // sqlite3 would create an empty DB on open — don't
+        try {
+          execFileSync(
+            "sqlite3",
+            [db, `DELETE FROM ItemTable WHERE key='${traecodeWorkspaceEnabledKey()}';`],
+            { timeout: 5_000, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] }
+          );
+        } catch {
+          /* locked DB for one workspace: leave it */
+        }
+      }
+    } catch {
+      /* no storage dir at all */
     }
     uninstallSkill(c, "traecode");
     c.log?.(`traecode: hooks + MCP registration + skill removed`);
