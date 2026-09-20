@@ -130,6 +130,11 @@ export interface SessionStartHookSpec {
   harness: string;
   parse(event: Record<string, unknown>): { cwd?: string; sessionId?: string };
   emit(output: SessionStartOutput): unknown;
+  /** Optional per-repo host registration, run once memory is confirmed LIVE for the repo (after
+   *  bank derivation and the opt-in/`disabled` gates). The implementation must never throw —
+   *  registration maintenance must not break the session it runs in. TraeCode uses this to keep
+   *  `<repo>/.trae/mcp.json` registering its MCP server (core/traecode-mcp.ts). */
+  ensureMcpRegistration?: (cwd: string) => void;
 }
 
 /**
@@ -385,6 +390,9 @@ export async function runSessionStartHook(
     cfg = resolved.cfg;
     const bankId = resolved.bankId;
     if (cfg.disabled) return; // per-bank opt-out (banks.<id> override)
+    // Memory is live HERE — the one point where registering the host's per-repo MCP access is
+    // correct: the caller of an opt-out repo must not gain a config file it never asked for.
+    spec.ensureMcpRegistration?.(cwd);
     // Daemon mode: warm it up now, before the user has typed anything. The start itself is
     // detached; we wait only briefly, so an already-running daemon is adopted immediately while a
     // cold one keeps coming up in the background and is picked up by a later turn.
