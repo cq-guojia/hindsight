@@ -865,6 +865,28 @@ describe("traecode installer", () => {
     expect(kept.hindsight).toBeUndefined();
   });
 
+  it("uninstall preserves unrelated top-level data when our entry was the only server", () => {
+    const ctx = ctxWithRealDist();
+    const repo = repoDir(ctx, "repo-a");
+    mkdirSync(repo, { recursive: true });
+    writeMapConfig(ctx, { [repo]: "Agent::A" });
+    expect(run(["install", "traecode"], ctx)).toBe(0);
+    writeJsonAt(repoMcp(ctx, "repo-a"), {
+      mcpServers: {
+        hindsight: {
+          command: "node",
+          args: [join(ctx.dist, "mcp-server.js")],
+          env: { HINDSIGHT_MCP_HARNESS: "traecode", HINDSIGHT_MCP_PROJECT_CWD: repo },
+        },
+      },
+      inputs: [{ type: "promptString", id: "commitMessage" }],
+    });
+    expect(run(["uninstall", "traecode"], ctx)).toBe(0);
+    const kept = readJson(repoMcp(ctx, "repo-a"));
+    expect(kept.inputs).toEqual([{ type: "promptString", id: "commitMessage" }]);
+    expect(kept.mcpServers).toBeUndefined(); // the emptied husk goes with our entry
+  });
+
   it.runIf(hasSqlite3)(
     "install seeds the enable switch for opted-in repos that already have a Trae window",
     () => {
