@@ -313,8 +313,9 @@ export function registerTraecodeWorkspaceMcp(
 }
 
 /** Uninstall counterpart of the registration: drop OUR entry from `<cwd>/.trae/mcp.json`,
- *  deleting the file when nothing remains in it (an empty mcpServers husk carries no
- *  information). A foreign "hindsight" entry and the rest of the document are never touched —
+ *  dropping the now-empty `mcpServers` husk with it and unlinking the file only when nothing at
+ *  all remains of the document — top-level keys the user hung beside `mcpServers` are never a
+ *  reason to unlink. A foreign "hindsight" entry and the rest of the document are untouched —
  *  same ownership check the registration applies. Never throws. True when the file changed. */
 export function removeTraecodeWorkspaceMcpEntry(
   cwd: string,
@@ -335,7 +336,8 @@ export function removeTraecodeWorkspaceMcpEntry(
     const record = servers as Record<string, unknown>;
     if (!isOurMcpEntry(record[MCP_SERVER_NAME])) return false; // foreign or absent: not ours to remove
     delete record[MCP_SERVER_NAME];
-    if (Object.keys(record).length === 0) rmSync(file);
+    if (Object.keys(record).length === 0) delete doc.mcpServers; // an empty husk carries no information
+    if (Object.keys(doc).length === 0) rmSync(file);
     else writeFileSync(file, JSON.stringify(doc, null, 2) + "\n");
     return true;
   } catch {
