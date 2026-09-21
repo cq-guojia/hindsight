@@ -216,11 +216,14 @@ recall and injection work exactly as they do there; the event map lives under th
 
 MCP is registered per repo, never at the user level: Trae launches user-level servers with the
 Electron process's cwd (your home directory), where a hindsight entry either self-disables under
-`optInOnly` (zero tools) or resolves the home bank instead of the repo's. So the installer writes
-no MCP config — it only migrates our stale user-level entry back out of
-`<userData>/User/mcp.json` — and the SessionStart hook maintains `<repo>/.trae/mcp.json`
-instead: a `mcpServers.hindsight` stdio server pinned to that repo via `HINDSIGHT_MCP_PROJECT_CWD`,
-merged not clobbered, idempotent, and gitignored when the repo has a `.gitignore` (the path is
+`optInOnly` (zero tools) or resolves the home bank instead of the repo's. So the installer
+pre-seeds the per-repo registration for every repo opted in via `mapPathToBank` — a
+`mcpServers.hindsight` stdio server in `<repo>/.trae/mcp.json`, pinned to that repo via
+`HINDSIGHT_MCP_PROJECT_CWD` — migrates any stale user-level entry back out of
+`<userData>/User/mcp.json`, and seeds the per-workspace enable switch directly. The SessionStart
+hook re-checks both on every session and writes them only when missing or stale (idempotent
+fallback) — Trae's hook sandbox cannot be relied on to perform those writes itself. The per-repo
+file is merged not clobbered, and gitignored when the repo has a `.gitignore` (the path is
 machine-specific). A foreign `hindsight` entry — in either file — is the user's own server and
 is never touched.
 
@@ -228,8 +231,10 @@ Trae only reads that per-repo file once the global `trae.mcp.enableWorkspaceMcp`
 (default off), so the installer handles the gate: an interactive run asks, a non-interactive run
 takes `--enable-workspace-mcp`, and either way the setting is written and Trae windows must be
 restarted to pick it up (declining, or a settings file with comments, prints the manual step).
-The per-workspace enable switch the hook seeds likewise takes effect on the NEXT window, so the
-MCP tools appear when you reload after the first session.
+Registrations and enable switches take effect on the NEXT window, so the MCP tools appear when
+you reload after the first session; repos opted into `mapPathToBank` after install need one more
+`install traecode` run, and if a repo's server still shows disabled in the MCP panel, flip it on
+once there.
 
 > One manual step remains after install (UI state the installer cannot write): enable the hooks
 > under TraeCode Settings > Hooks. If you declined the workspace-MCP prompt, enable it later in

@@ -49,7 +49,10 @@ import { readLegacyEndpoint } from "./core/legacy";
 import { SKILL_DIRS, resolveSkillDirs, traecodeDotDirName } from "./core/skill-dirs";
 import {
   enableWorkspaceMcpSetting,
+  ensureWorkspaceMcpEnabled,
   markWorkspaceMcpEnabled,
+  registerTraecodeWorkspaceMcp,
+  removeTraecodeWorkspaceMcpEntry,
   traecodeUserDataDir,
   traecodeUserSettingsPath,
   traecodeWorkspaceEnabledKey,
@@ -2024,6 +2027,53 @@ const traecode: HarnessInstaller = {
       c.log?.(`traecode: sandbox readWrite rules added (${needed.join(", ")})`);
     }
 
+    // Pre-seed what the SessionStart hook would otherwise write per session: the per-repo MCP
+    // registration and the workspace enable switch for every repo in mapPathToBank. Trae's hook
+    // sandbox denies file creation in the workspace and (observed live 2026-09-21) drops
+    // sandbox.json rules targeting Trae's own storage, so on stock installs both hook writes
+    // fail — the installer runs unsandboxed and lands them. Because the hook checks before
+    // writing, a pre-seeded repo turns every later session into a read-only no-op.
+    const config = readJson(process.env.HINDSIGHT_CONFIG || join(c.home, ...CONFIG_RELATIVE));
+    const repos = Object.keys(config.mapPathToBank ?? {}).sort();
+    if (repos.length) {
+      const written: string[] = [];
+      const current: string[] = [];
+      const skipped: string[] = [];
+      let seeded = 0;
+      for (const repo of repos) {
+        // A map entry whose directory is gone must not grow a phantom `.trae` tree via mkdir -p.
+        if (!existsSync(repo)) {
+          skipped.push(repo);
+          continue;
+        }
+        const outcome = registerTraecodeWorkspaceMcp(repo, { home: c.home, dist: c.dist });
+        if (outcome === "registered") written.push(repo);
+        else if (outcome === "current") current.push(repo);
+        else skipped.push(repo);
+        if (ensureWorkspaceMcpEnabled(repo, { home: c.home }) !== "failed") seeded++;
+      }
+      c.log?.(
+        `traecode: per-repo MCP registration — ${written.length} written, ${current.length} ` +
+          `already current, ${skipped.length} skipped across ${repos.length} opted-in repo(s); ` +
+          `enable switch on for ${seeded}`
+      );
+      if (written.length) c.log?.(`  registered: ${written.join(", ")}`);
+      if (skipped.length) {
+        c.log?.(
+          `  skipped (missing repo, no dist build, or a foreign hindsight entry): ` +
+            skipped.join(", ")
+        );
+      }
+      // A freshly seeded switch takes effect in the NEXT window (Trae holds the running one's
+      // table in memory); if a repo was opened before this install, one panel flip covers it.
+      if (written.length) {
+        c.log?.(
+          "  new registrations appear in the next Trae window — if a repo's server still shows\n" +
+            "  disabled in the MCP panel, flip it on once there"
+        );
+      }
+    }
+
     ensureTraecodeWorkspaceMcpGate(c);
   },
   uninstall(c) {
@@ -2041,6 +2091,18 @@ const traecode: HarnessInstaller = {
     }
     if (removeTraecodeUserMcpEntry(c)) {
       c.log?.(`traecode: MCP entry removed from ${traecodeMcpPath(c)}`);
+    }
+    // The per-repo registrations the installer (or the hook) wrote: drop our entry from every
+    // opted-in repo's .trae/mcp.json, deleting the file when nothing remains in it. Foreign
+    // servers and foreign "hindsight" entries are never touched — same ownership check as the
+    // hook's. Missing repos skip silently; the storage sweep below still catches their switches.
+    const config = readJson(process.env.HINDSIGHT_CONFIG || join(c.home, ...CONFIG_RELATIVE));
+    const repoEntries = Object.keys(config.mapPathToBank ?? {}).sort();
+    const cleaned = repoEntries.filter((repo) =>
+      removeTraecodeWorkspaceMcpEntry(repo, { home: c.home })
+    );
+    if (cleaned.length) {
+      c.log?.(`traecode: per-repo MCP registration removed from:\n  ${cleaned.join("\n  ")}`);
     }
     const sandboxPath = join(c.home, traecodeDotDirName(c.home), "sandbox.json");
     if (existsSync(sandboxPath)) {

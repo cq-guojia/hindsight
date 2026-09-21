@@ -23,9 +23,16 @@
  * machine-specific path, so a repo .gitignore that does not already ignore the file gets the one
  * line that keeps it out of version control — but only when a .gitignore already exists: creating
  * one is a bigger statement about the repo than a hook should make.
+ *
+ * The installer pre-writes the same registration (and seeds the workspace enable switch below) for
+ * every repo in `mapPathToBank` — it runs unsandboxed, while Trae's hook sandbox denies file
+ * creation in the workspace and (observed live, 2026-09-21) drops sandbox.json rules aimed at
+ * Trae's own storage. The hook stays as a best-effort top-up for repos opted in after the last
+ * install; because both paths check before writing, whichever lands first leaves the other a
+ * read-only no-op.
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -236,19 +243,20 @@ export function ensureTraecodeWorkspaceMcp(
 }
 
 /** The registration itself — merge-not-clobber, foreign entries untouched, idempotent. Never
- *  throws, never rewrites anything but our own entry, and does nothing when already correct. */
-function registerTraecodeWorkspaceMcp(
+ *  throws, never rewrites anything but our own entry, and does nothing when already correct.
+ *  Returns what happened: the installer reports it per opted-in repo; the hook ignores it. */
+export function registerTraecodeWorkspaceMcp(
   cwd: string,
   opts: { home?: string; dist?: string } = {}
-): void {
+): "registered" | "current" | "skipped" | "failed" {
   try {
     const home = opts.home ?? homedir();
     // Trae launched the USER-level server from home — that is exactly the registration we are
     // repairing; writing a workspace file into $HOME would create a pseudo-workspace there.
-    if (!cwd || !isAbsolute(cwd) || dirname(cwd) === cwd || cwd === home) return;
+    if (!cwd || !isAbsolute(cwd) || dirname(cwd) === cwd || cwd === home) return "skipped";
     const dist = opts.dist ?? bundledDistDir();
     const script = join(dist, "mcp-server.js");
-    if (!existsSync(script)) return; // a dev tree before any build: no registration to point at
+    if (!existsSync(script)) return "skipped"; // a dev tree before any build: no registration to point at
     const file = join(cwd, MCP_FILE_REL);
 
     let doc: Record<string, unknown> = {};
@@ -257,7 +265,7 @@ function registerTraecodeWorkspaceMcp(
       doc = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
       exists = true;
     } catch {
-      if (existsSync(file)) return; // unparseable: leave the user's file untouched, never clobber
+      if (existsSync(file)) return "skipped"; // unparseable: leave the user's file untouched, never clobber
     }
     const servers = (
       doc.mcpServers && typeof doc.mcpServers === "object" && !Array.isArray(doc.mcpServers)
@@ -285,20 +293,53 @@ function registerTraecodeWorkspaceMcp(
       };
     } else {
       diag("traecode", "workspace_mcp_foreign_entry", { cwd, file });
-      return; // a foreign "hindsight" server is the user's decision, not ours to overwrite
+      return "skipped"; // a foreign "hindsight" server is the user's decision, not ours to overwrite
     }
-    if (existing !== undefined && canon(merged) === canon(existing)) return; // already correct — idempotent no-op
+    if (existing !== undefined && canon(merged) === canon(existing)) return "current"; // already correct — idempotent no-op
 
     servers[MCP_SERVER_NAME] = merged;
     mkdirSync(dirname(file), { recursive: true });
     writeFileSync(file, JSON.stringify(doc, null, 2) + "\n");
     if (!exists) ensureGitignored(cwd);
     diag("traecode", "workspace_mcp_registered", { cwd, file });
+    return "registered";
   } catch (e) {
     diag("traecode", "workspace_mcp_register_failed", {
       cwd,
       error: e instanceof Error ? e.message : String(e),
     });
+    return "failed";
+  }
+}
+
+/** Uninstall counterpart of the registration: drop OUR entry from `<cwd>/.trae/mcp.json`,
+ *  deleting the file when nothing remains in it (an empty mcpServers husk carries no
+ *  information). A foreign "hindsight" entry and the rest of the document are never touched —
+ *  same ownership check the registration applies. Never throws. True when the file changed. */
+export function removeTraecodeWorkspaceMcpEntry(
+  cwd: string,
+  opts: { home?: string } = {}
+): boolean {
+  try {
+    const home = opts.home ?? homedir();
+    if (!cwd || !isAbsolute(cwd) || dirname(cwd) === cwd || cwd === home) return false;
+    const file = join(cwd, MCP_FILE_REL);
+    let doc: Record<string, unknown>;
+    try {
+      doc = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+    } catch {
+      return false; // absent or unparseable: nothing of ours in it to remove
+    }
+    const servers = doc.mcpServers;
+    if (!servers || typeof servers !== "object" || Array.isArray(servers)) return false;
+    const record = servers as Record<string, unknown>;
+    if (!isOurMcpEntry(record[MCP_SERVER_NAME])) return false; // foreign or absent: not ours to remove
+    delete record[MCP_SERVER_NAME];
+    if (Object.keys(record).length === 0) rmSync(file);
+    else writeFileSync(file, JSON.stringify(doc, null, 2) + "\n");
+    return true;
+  } catch {
+    return false;
   }
 }
 
