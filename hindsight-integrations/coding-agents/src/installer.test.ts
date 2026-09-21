@@ -953,6 +953,140 @@ describe("traecode installer", () => {
     expect(readJson(sandboxPath(ctx)).filesystem.readWrite).toEqual([]);
   });
 
+  // The installer pre-seeds the per-repo registration and enable switch for mapPathToBank repos:
+  // the SessionStart hook's writes fail under Trae's sandbox (file creation denied in the
+  // workspace, storage rules dropped — see core/traecode-mcp.ts), so the unsandboxed installer
+  // is the path that actually lands them.
+  const repoDir = (ctx: InstallCtx, name: string) => join(ctx.home, name);
+  const repoMcp = (ctx: InstallCtx, name: string) => join(repoDir(ctx, name), ".trae", "mcp.json");
+  const writeMapConfig = (ctx: InstallCtx, map: Record<string, string>) =>
+    writeJsonAt(join(ctx.home, ".hindsight", "coding-agent.json"), { mapPathToBank: map });
+
+  /** makeCtx's dist is a synthetic /opt path the registration's `existsSync(dist/mcp-server.js)`
+   *  guard rejects; the pre-seed needs a real dist file, laid out as `coding-agents/dist/` so the
+   *  entry also satisfies isOurMcpEntry's ownership shape for the uninstall assertions. */
+  const ctxWithRealDist = (): InstallCtx => {
+    const root = mkdtempSync(join(tmpdir(), "hs-traecode-dist-"));
+    homes.push(root);
+    const dist = join(root, "coding-agents", "dist");
+    mkdirSync(dist, { recursive: true });
+    writeFileSync(join(dist, "mcp-server.js"), "// stub");
+    return { ...makeCtx(), dist };
+  };
+
+  it("pre-seeds the per-repo MCP registration for every existing mapPathToBank repo", () => {
+    const ctx = ctxWithRealDist();
+    const a = repoDir(ctx, "repo-a");
+    const b = repoDir(ctx, "repo-b");
+    const missing = repoDir(ctx, "gone-repo"); // never created: must not grow a .trae tree
+    mkdirSync(a, { recursive: true });
+    mkdirSync(b, { recursive: true });
+    writeMapConfig(ctx, { [b]: "Agent::B", [a]: "Agent::A", [missing]: "Agent::Gone" });
+    const logs: string[] = [];
+    expect(run(["install", "traecode"], { ...ctx, log: (m) => logs.push(m) })).toBe(0);
+    for (const [repo, dir] of [
+      [a, "repo-a"],
+      [b, "repo-b"],
+    ] as const) {
+      expect(readJson(repoMcp(ctx, dir)).mcpServers.hindsight).toEqual({
+        command: "node",
+        args: [join(ctx.dist, "mcp-server.js")],
+        env: { HINDSIGHT_MCP_HARNESS: "traecode", HINDSIGHT_MCP_PROJECT_CWD: repo },
+      });
+    }
+    expect(existsSync(missing)).toBe(false);
+    expect(logs.join("\n")).toMatch(/2 written, 0 already current, 1 skipped/);
+  });
+
+  it("re-install leaves a current registration byte-identical and reports it", () => {
+    const ctx = ctxWithRealDist();
+    mkdirSync(repoDir(ctx, "repo-a"), { recursive: true });
+    writeMapConfig(ctx, { [repoDir(ctx, "repo-a")]: "Agent::A" });
+    expect(run(["install", "traecode"], ctx)).toBe(0);
+    const before = readFileSync(repoMcp(ctx, "repo-a"), "utf8");
+    const logs: string[] = [];
+    expect(run(["install", "traecode"], { ...ctx, log: (m) => logs.push(m) })).toBe(0);
+    expect(readFileSync(repoMcp(ctx, "repo-a"), "utf8")).toBe(before);
+    expect(logs.join("\n")).toMatch(/0 written, 1 already current/);
+  });
+
+  it("never touches a foreign hindsight entry in a repo's .trae/mcp.json", () => {
+    const ctx = ctxWithRealDist();
+    const repo = repoDir(ctx, "repo-a");
+    mkdirSync(repo, { recursive: true });
+    writeMapConfig(ctx, { [repo]: "Agent::A" });
+    writeJsonAt(repoMcp(ctx, "repo-a"), {
+      mcpServers: { hindsight: { command: "their-own-proxy", args: ["serve"] } },
+    });
+    const logs: string[] = [];
+    expect(run(["install", "traecode"], { ...ctx, log: (m) => logs.push(m) })).toBe(0);
+    expect(readJson(repoMcp(ctx, "repo-a")).mcpServers.hindsight).toEqual({
+      command: "their-own-proxy",
+      args: ["serve"],
+    });
+    expect(logs.join("\n")).toMatch(/1 skipped/);
+  });
+
+  it("uninstall removes the pre-seeded registration but keeps a repo's foreign servers", () => {
+    const ctx = ctxWithRealDist();
+    const repo = repoDir(ctx, "repo-a");
+    mkdirSync(repo, { recursive: true });
+    writeMapConfig(ctx, { [repo]: "Agent::A" });
+    expect(run(["install", "traecode"], ctx)).toBe(0);
+    expect(existsSync(repoMcp(ctx, "repo-a"))).toBe(true);
+    expect(run(["uninstall", "traecode"], ctx)).toBe(0);
+    expect(existsSync(repoMcp(ctx, "repo-a"))).toBe(false);
+
+    // A repo that also carries a foreign server keeps the file, minus only our entry.
+    const foreign = repoDir(ctx, "repo-b");
+    mkdirSync(foreign, { recursive: true });
+    writeMapConfig(ctx, { [repo]: "Agent::A", [foreign]: "Agent::B" });
+    expect(run(["install", "traecode"], ctx)).toBe(0);
+    writeJsonAt(repoMcp(ctx, "repo-b"), {
+      mcpServers: {
+        playwright: { command: "npx" },
+        hindsight: {
+          command: "node",
+          args: [join(ctx.dist, "mcp-server.js")],
+          env: { HINDSIGHT_MCP_HARNESS: "traecode", HINDSIGHT_MCP_PROJECT_CWD: foreign },
+        },
+      },
+    });
+    expect(run(["uninstall", "traecode"], ctx)).toBe(0);
+    const kept = readJson(repoMcp(ctx, "repo-b")).mcpServers;
+    expect(kept.playwright).toEqual({ command: "npx" });
+    expect(kept.hindsight).toBeUndefined();
+  });
+
+  it.runIf(hasSqlite3)(
+    "install seeds the enable switch for opted-in repos that already have a Trae window",
+    () => {
+      const ctx = ctxWithRealDist();
+      const repo = repoDir(ctx, "repo-a");
+      mkdirSync(repo, { recursive: true });
+      writeMapConfig(ctx, { [repo]: "Agent::A" });
+      const ws = wsStorageDir(ctx, "abc123");
+      mkdirSync(ws, { recursive: true });
+      writeFileSync(
+        join(ws, "workspace.json"),
+        JSON.stringify({ folder: pathToFileURL(repo).href })
+      );
+      const db = join(ws, "state.vscdb");
+      execFileSync("sqlite3", [
+        db,
+        "CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB);",
+        "INSERT OR REPLACE INTO ItemTable (key, value) VALUES ('some.other.key', '1');",
+      ]);
+      expect(run(["install", "traecode"], ctx)).toBe(0);
+      const value = (key: string) =>
+        execFileSync("sqlite3", [db, `SELECT value FROM ItemTable WHERE key='${key}';`], {
+          encoding: "utf8",
+        }).trim();
+      expect(value(traecodeWorkspaceEnabledKey())).toBe("true");
+      expect(value("some.other.key")).toBe("1");
+    }
+  );
+
   it("targets the international ~/.trae dot-dir when only it exists — the edition probe", () => {
     const ctx = ctxWithPackagedSkill();
     mkdirSync(join(ctx.home, ".trae"), { recursive: true });
