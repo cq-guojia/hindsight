@@ -196,7 +196,7 @@ refuses to touch an MCP server named `hindsight` that it did not write.
 > appending each new turn to the same session document. `--import-conversations` is therefore not
 > available for ZCode: there is no past history on disk to backfill from.
 
-#### <img src="https://hindsight.vectorize.io/img/harness/traecode.svg" alt="" width="20" height="20" /> TraeCode
+#### <img src="https://hindsight.vectorize.io/img/harness/traecode.png" alt="" width="20" height="20" /> TraeCode
 
 ```bash
 npx @vectorize-io/hindsight-coding-agents install traecode
