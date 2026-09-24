@@ -70,6 +70,8 @@ export interface KnowledgeNode {
   tags: string[];
   timestamp: string | null;
   is_stale: boolean | null;
+  /** Pages only: when the last refresh failed. Set = the page no longer rebuilds itself. */
+  last_refresh_failed_at?: string | null;
   /** Pages only: when the page rebuilds itself and over which facts. Null on folders. */
   trigger: MentalModel["trigger"] | null;
   children: KnowledgeNode[];
@@ -258,6 +260,8 @@ export interface MentalModel {
   created_at: string;
   reflect_response?: any;
   is_stale?: boolean | null;
+  /** When the last refresh failed. Set = automatic refreshes are paused for this model. */
+  last_refresh_failed_at?: string | null;
 }
 
 /** How a refresh resolved full-vs-delta, and why it did not stay in delta. */
@@ -731,6 +735,8 @@ export class ControlPlaneClient {
         items_count: number;
         document_id: string | null;
         filename?: string | null;
+        /** The model a refresh operation belongs to; null on every other type. */
+        mental_model_id?: string | null;
         created_at: string;
         updated_at?: string | null;
         status: string;
@@ -1325,6 +1331,37 @@ export class ControlPlaneClient {
   }
 
   /**
+   * List the extra ids this bank also answers to.
+   *
+   * `bank_id` in the response is the bank's own id, which an alias never
+   * replaces — so a request made *through* an alias still reports the real one.
+   */
+  async listBankAliases(bankId: string) {
+    return this.fetchApi<{ bank_id: string; aliases: string[] }>(bankApi(bankId, "/aliases"));
+  }
+
+  /**
+   * Add an id that also reaches this bank. Rejected with 409 if the name is
+   * already a bank or another alias.
+   */
+  async createBankAlias(bankId: string, alias: string) {
+    return this.fetchApi<{ bank_id: string; aliases: string[] }>(bankApi(bankId, "/aliases"), {
+      method: "POST",
+      body: JSON.stringify({ alias }),
+    });
+  }
+
+  /**
+   * Stop an id reaching this bank. The bank and its memories are untouched.
+   */
+  async deleteBankAlias(bankId: string, alias: string) {
+    return this.fetchApi<{ bank_id: string; aliases: string[] }>(
+      bankApi(bankId, `/aliases/${encodeURIComponent(alias)}`),
+      { method: "DELETE" }
+    );
+  }
+
+  /**
    * List directives for a bank
    */
   async listDirectives(
@@ -1677,6 +1714,8 @@ export class ControlPlaneClient {
         last_memory_seen_at: string | null;
         /** Whether a memory in this model's own scope has been written since it last read them. */
         is_stale: boolean | null;
+        /** When the last refresh failed. Set = automatic refreshes are paused for this model. */
+        last_refresh_failed_at?: string | null;
         created_at: string;
         reflect_response?: {
           text: string;

@@ -64,7 +64,7 @@ if TYPE_CHECKING:
     from opentelemetry.trace import Span
 
 from fastapi.routing import APIRoute
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from hindsight_api import MemoryEngine
 from hindsight_api.config import RETAIN_EXTRACTION_MODES
@@ -230,6 +230,7 @@ from hindsight_api.engine.reflect import ReflectNoAnswerError, ReflectToolCallEr
 from hindsight_api.engine.response_models import (
     VALID_RECALL_FACT_TYPES,
     ConsolidationStrategiesPreview,
+    ConsolidationStrategySpec,
     DryRunExtractionResult,
     MemoryFact,
     MinScores,
@@ -1799,6 +1800,30 @@ class BankProfileResponse(BaseModel):
     background: str | None = Field(default=None, description="Deprecated: use mission instead")
 
 
+class BankAliasesResponse(BaseModel):
+    """Response model for a bank's aliases."""
+
+    model_config = ConfigDict(
+        json_schema_extra={"example": {"bank_id": "user123", "aliases": ["user-123", "legacy-user123"]}}
+    )
+
+    bank_id: str = Field(description="The bank's own id, which an alias never replaces")
+    aliases: list[str] = Field(description="Extra ids that also reach this bank, oldest first")
+
+
+class CreateBankAliasRequest(BaseModel):
+    """Request model for adding an alias to a bank."""
+
+    model_config = ConfigDict(json_schema_extra={"example": {"alias": "user-123"}})
+
+    alias: str = Field(
+        description=(
+            "The extra bank id. Same rules as a bank id (non-empty, at most 192 bytes of UTF-8, no "
+            "control characters), and it must not already name a bank or another alias."
+        )
+    )
+
+
 class UpdateDispositionRequest(BaseModel):
     """Request model for updating disposition traits."""
 
@@ -1881,6 +1906,14 @@ class BankListItem(BaseModel):
         description=(
             "When anything was last written to this bank: a document retained (including "
             "appends to an existing document) or a fact stored. Null if the bank is empty."
+        ),
+    )
+    matched_aliases: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Aliases of this bank that matched the search `q`. Empty when no search was "
+            "made, or when the bank matched on its own id or name — so a non-empty value "
+            "explains a result whose `bank_id` does not contain the search text."
         ),
     )
 
@@ -2232,13 +2265,40 @@ class ObservationScope(BaseModel):
     count: int = Field(description="Number of observations that live under this scope")
 
 
+def _bank_template_config_from_overrides(overrides: dict[str, Any]) -> "BankTemplateConfig | None":
+    """Build the exportable config from a bank's stored overrides.
+
+    Drops any field the template model rejects instead of failing the export. A
+    bank can hold a value the model no longer accepts — stored before a field was
+    typed, or written by an older version — and an export that raised there would
+    make the whole bank un-exportable with a 500, for one field nothing reads.
+    Skipping it (with a warning) still exports everything else, and importing the
+    result simply leaves that field unset.
+    """
+    filtered = {k: v for k, v in overrides.items() if k in BankTemplateConfig.model_fields}
+    while filtered:
+        try:
+            return BankTemplateConfig(**filtered)
+        except ValidationError as e:
+            invalid = {str(err["loc"][0]) for err in e.errors() if err.get("loc")} & set(filtered)
+            if not invalid:
+                raise
+            logger.warning(
+                "Bank template export: dropping stored config field(s) the template model rejects: %s",
+                ", ".join(sorted(invalid)),
+            )
+            for field in invalid:
+                filtered.pop(field, None)
+    return None
+
+
 class ConsolidationStrategiesPreviewRequest(BaseModel):
     """A draft consolidation_strategies value to preview against existing scopes."""
 
-    # Same free-form shape as the consolidation_strategies config field: the
-    # preview must accept exactly what the editor is about to save, malformed
-    # entries included, and report them as inactive rather than reject them.
-    strategies: list[dict[str, Any]] = Field(description="Draft consolidation_strategies value")
+    # Same shape as the consolidation_strategies config field, so the editor can
+    # preview exactly what it is about to save. Incomplete drafts are fine (a rule
+    # with no tags yet); the preview reports those strategies as inactive.
+    strategies: list[ConsolidationStrategySpec] = Field(description="Draft consolidation_strategies value")
     sample_limit: int = Field(default=5, ge=0, le=50, description="Example scopes returned per rule")
 
 
@@ -3312,6 +3372,16 @@ class MentalModelResponse(BaseModel):
             "against the model's own scope. Null for a model no refresh has stamped yet."
         ),
     )
+    last_refresh_failed_at: str | None = Field(
+        default=None,
+        description=(
+            "When this model's most recent refresh failed, in ISO format, or null when the last one "
+            "succeeded. While this is set the automatic triggers (`refresh_after_consolidation`, "
+            "`refresh_cron`) skip the model — a refresh that cannot succeed is not retried on every "
+            "tick. An explicit refresh still runs, and a successful one clears this. The failure "
+            "itself, with its reason, is in the model's history."
+        ),
+    )
     created_at: str | None = None
     reflect_response: dict | None = Field(
         default=None,
@@ -3367,6 +3437,12 @@ class KnowledgeNode(BaseModel):
         "That is the same check a scheduled refresh runs before spending an LLM call, so a flagged page "
         "is one a refresh would actually rewrite. Deletions are not observed: removing an in-scope memory "
         "leaves no write behind, so it does not raise this flag.",
+    )
+    last_refresh_failed_at: str | None = Field(
+        default=None,
+        description="Pages only: when this page's most recent refresh failed, in ISO format, or null "
+        "when the last one succeeded. While it is set the page does not rebuild itself on its "
+        "trigger — see the same field on the mental model. An explicit refresh still runs.",
     )
     trigger: MentalModelTrigger | None = Field(
         default=None,
@@ -3464,8 +3540,22 @@ class KnowledgePageResponse(BaseModel):
     description: str | None = Field(default=None, description="The source query that rebuilds the page.")
     tags: list[str] = FieldWithDefault(list)
     timestamp: str | None = Field(default=None, description="Last refresh time (falls back to creation).")
-    body: str | None = Field(default=None, description="The page's synthesized markdown body.")
-    markdown: str = Field(description="The full markdown document: YAML frontmatter + markdown body.")
+    body: str | None = Field(
+        default=None,
+        description=(
+            "The page's synthesized markdown body, exactly as stored. Empty until a refresh "
+            "writes one — unlike `markdown`, which says so in words. Build a UI's own empty "
+            "state off this field; read `markdown` to show the document itself."
+        ),
+    )
+    markdown: str = Field(
+        description=(
+            "The full markdown document: YAML frontmatter + markdown body. A page with no body "
+            "yet renders 'No content yet.' as its body rather than frontmatter alone, which reads "
+            "as a page that failed to render. The notice is added here on the way out; the stored "
+            "body in `body` stays empty, and the export bundle keeps the bare document."
+        )
+    )
 
 
 class KnowledgePageBundleFile(BaseModel):
@@ -3487,7 +3577,14 @@ class KnowledgePageSearchResult(BaseModel):
     id: str
     name: str
     mental_model_id: str | None = None
-    snippet: str
+    snippet: str = Field(
+        description=(
+            "The page's opening text. A page whose body is still empty says so in words — "
+            "'No content yet.' — rather than coming back blank, so a caller can tell an "
+            "unwritten page from a page whose snippet simply did not render. The marker is "
+            "produced on the way out; the stored body stays empty and out of the search index."
+        )
+    )
     score: float = Field(
         description=(
             "Rank-fusion score in 0..1, where 1.0 means every search arm placed this page first. "
@@ -3519,6 +3616,7 @@ def _knowledge_node_model(node: dict[str, Any]) -> KnowledgeNode:
         tags=list(node.get("tags") or []) if is_page else [],
         timestamp=(node.get("last_refreshed_at") if is_page else node.get("updated_at")),
         is_stale=node.get("is_stale") if is_page else None,
+        last_refresh_failed_at=node.get("last_refresh_failed_at") if is_page else None,
         trigger=node.get("trigger") if is_page else None,
     )
 
@@ -3548,7 +3646,7 @@ def _knowledge_page_response(node: dict[str, Any]) -> KnowledgePageResponse:
         tags=page.display_tags,
         timestamp=node.get("last_refreshed_at") or node.get("created_at"),
         body=node.get("content"),
-        markdown=page_markdown.render_document(node),
+        markdown=page_markdown.render_document(node, notice_when_empty=True),
     )
 
 
@@ -3718,18 +3816,16 @@ class BankTemplateConfig(BaseModel):
             "matching rule wins; unmatched scopes fall back to max_observations_per_scope."
         ),
     )
-    consolidation_strategies: list[dict[str, Any]] | None = Field(
+    consolidation_strategies: list[ConsolidationStrategySpec] | None = Field(
         default=None,
         description=(
             "Per-scope consolidation settings: "
             '[{"scopes": [{"tags": ["company:*"]}], "observations_mission": "Record only generalized '
-            'trends.", "max_observations_per_scope": 20}]. Each strategy lists the scopes '
-            "it claims — a scope is a list of fnmatch tag-globs, and a consolidation pass "
-            "is claimed when any of the strategy's patterns matches its tags. Each pattern is "
-            '{"tags": [...], "tags_match": ...}; "tags_match" is "all" (default) — the scope has '
-            'every tag in the pattern, other tags allowed — or "exact" — the scope has '
-            "exactly the pattern's tags and no others. A strategy may set any of "
-            "observations_mission, max_observations_per_scope, "
+            'trends.", "max_observations_per_scope": 20}]. Each strategy lists the rules it claims '
+            "scopes with — a rule's tags are fnmatch globs that must all be on the scope, and its "
+            '"tags_match" decides whether the scope may carry others ("all", the default) or not '
+            '("exact"). The rules are alternatives: any one matching claims the scope. A strategy may '
+            "set any of observations_mission, max_observations_per_scope, "
             "consolidation_source_facts_max_tokens and "
             "consolidation_source_facts_max_tokens_per_observation; each is optional. "
             "Exactly one strategy applies to a scope: the first in the list that claims it. "
@@ -4234,7 +4330,7 @@ async def _apply_bank_template_resources(
                     bank_id=bank_id,
                     name=mm.name,
                     source_query=mm.source_query,
-                    content="Generating content...",
+                    content="",
                     mental_model_id=mm.id,
                     tags=mm.tags if mm.tags else None,
                     max_tokens=mm.max_tokens,
@@ -5238,7 +5334,38 @@ def _register_routes(app: FastAPI):
             else:
                 api_key = authorization.strip()
         extra_headers = collect_passthrough_headers(request.headers.raw, get_config().extension_passthrough_headers)
-        return RequestContext(api_key=api_key, extra_headers=extra_headers)
+        # One context per request, reused by every caller. The alias resolution on
+        # the route class builds one before FastAPI solves the endpoint's
+        # dependencies, and `authenticated_schema` is memoised on the object — so
+        # sharing it is what keeps a request to one tenant authentication.
+        cached = getattr(request.state, "hs_request_context", None)
+        if cached is not None:
+            return cached
+        context = RequestContext(api_key=api_key, extra_headers=extra_headers)
+        request.state.hs_request_context = context
+        return context
+
+    async def _resolve_bank_alias(request: Request, bank_id: str) -> str:
+        """Turn an aliased bank id from the path into the bank's canonical id.
+
+        Installed on ``app.state`` for the route class to call (see
+        :mod:`hindsight_api.api.unknown_params`), which is the one place every bank
+        endpoint passes through. It lives here, not there, because it needs this
+        app's engine and this request's tenant: aliases are per-schema, and the
+        schema comes from authenticating the caller.
+
+        Authentication is not extra work, only earlier work -- the endpoint's own
+        engine call authenticates too, and both reach the same cached contextvar.
+        """
+        # The engine authenticates the tenant and does the lookup: aliases are
+        # per-schema, and the schema comes from the caller's identity. This layer
+        # only supplies the request context, since API handlers do no data access.
+        return await app.state.memory.resolve_bank_alias(
+            bank_id,
+            request_context=get_request_context(request, request.headers.get("authorization")),
+        )
+
+    app.state.resolve_bank_alias = _resolve_bank_alias
 
     def admit_for(operation: PrecheckOperation):
         """Build a FastAPI dependency that holds an admission permit for the request.
@@ -5478,7 +5605,18 @@ def _register_routes(app: FastAPI):
         from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
         worker_metrics = getattr(app.state, "worker_metrics", None)
-        metrics_data = worker_metrics.render() if worker_metrics is not None else generate_latest()
+        # Render off the event loop. generate_latest() (and WorkerMetrics.render, which also does
+        # blocking file I/O) are synchronous, and serialization cost scales with metric cardinality
+        # -- on a large registry it takes seconds. Awaiting it inline blocks the asyncio loop for
+        # that whole duration, so /health, WebSocket handshakes, and every other request this worker
+        # is handling stall until the scrape completes. Offloading to a worker thread doesn't make
+        # the render free -- it is pure Python, so it holds the GIL and only yields every
+        # sys.getswitchinterval() -- but the loop is descheduled in 5ms slices instead of frozen for
+        # the whole render, which is the difference between degraded and dead. Both paths are safe
+        # to call off-thread (generate_latest is designed to be scraped off-thread, and
+        # WorkerMetrics.render only reads a registry + per-worker snapshot files).
+        render = worker_metrics.render if worker_metrics is not None else generate_latest
+        metrics_data = await asyncio.to_thread(render)
         return Response(content=metrics_data, media_type=CONTENT_TYPE_LATEST)
 
     @app.get(
@@ -6721,12 +6859,12 @@ def _register_routes(app: FastAPI):
     ):
         """Create a mental model (async - returns operation_id)."""
         try:
-            # 1. Create the mental model with placeholder content
+            # 1. Create the mental model with an empty body; the async refresh fills it
             mental_model = await app.state.memory.create_mental_model(
                 bank_id=bank_id,
                 name=body.name,
                 source_query=body.source_query,
-                content="Generating content...",
+                content="",
                 mental_model_id=body.id if body.id else None,
                 tags=body.tags if body.tags else None,
                 max_tokens=body.max_tokens,
@@ -7031,7 +7169,7 @@ def _register_routes(app: FastAPI):
                 bank_id=bank_id,
                 name=body.name,
                 source_query=body.source_query,
-                content="Generating content...",
+                content="",
                 parent_id=body.parent_id,
                 tags=body.tags if body.tags else None,
                 max_tokens=body.max_tokens,
@@ -7191,14 +7329,12 @@ def _register_routes(app: FastAPI):
             # parent_id is applied only when present in the body, so passing null
             # moves the node to the root (distinct from "not provided"), which is
             # what KEEP_PARENT stands in for. Page options live on the backing
-            # mental model and each applies only when supplied (so tags=[] clears,
-            # distinct from "not provided").
-            page_fields = {"source_query", "tags", "max_tokens", "trigger"} & body.model_fields_set
-            if body.name is None and "parent_id" not in body.model_fields_set and not page_fields:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Provide name, parent_id, source_query, tags, max_tokens, and/or trigger to update",
-                )
+            # mental model and take the opposite convention: null there means "not
+            # changing this", while an empty VALUE is a real change (tags=[] clears
+            # them). So a body that is null all the way down changes nothing at all,
+            # and the engine rejects it with a 400 before reading anything — a no-op
+            # authorizes no operation, and would otherwise hand the node's metadata
+            # to a caller the validator never got to judge.
             # One call, one transaction: a rename must not survive the move that
             # fails after it, which is what left clients retrying against a tree
             # they never asked for.
@@ -7207,9 +7343,11 @@ def _register_routes(app: FastAPI):
                 node_id=node_id,
                 name=body.name,
                 parent_id=body.parent_id if "parent_id" in body.model_fields_set else KEEP_PARENT,
-                source_query=body.source_query if "source_query" in page_fields else None,
-                tags=body.tags if "tags" in page_fields else None,
-                max_tokens=body.max_tokens if "max_tokens" in page_fields else None,
+                # Each page option defaults to None on the model, so an absent field
+                # and an explicit null are the same "not supplied" the engine expects.
+                source_query=body.source_query,
+                tags=body.tags,
+                max_tokens=body.max_tokens,
                 # Only the trigger fields the client stated: the engine patches them over
                 # the page's current trigger, and a full dump would carry this model's own
                 # defaults (mode="full", exclude_mental_models=False) into every update.
@@ -7221,7 +7359,7 @@ def _register_routes(app: FastAPI):
             # A new source query means the content is stale — rebuild it. Scheduled
             # only once the patch has committed, so a refresh is never queued for a
             # change that rolled back.
-            if "source_query" in page_fields and body.source_query is not None and updated.get("mental_model_id"):
+            if body.source_query is not None and updated.get("mental_model_id"):
                 await app.state.memory.submit_async_refresh_mental_model(
                     bank_id=bank_id,
                     mental_model_id=updated["mental_model_id"],
@@ -8115,6 +8253,89 @@ def _register_routes(app: FastAPI):
             ),
         )
 
+    @app.get(
+        "/v1/default/banks/{bank_id}/aliases",
+        response_model=BankAliasesResponse,
+        summary="List the bank's aliases",
+        description=(
+            "Extra bank ids that reach this bank. Every endpoint accepts an alias wherever it "
+            "accepts a bank id, so callers can be moved onto a new id in phases while the old one "
+            "keeps working."
+        ),
+        operation_id="list_bank_aliases",
+        tags=["Banks"],
+    )
+    async def api_list_bank_aliases(bank_id: str, request_context: RequestContext = Depends(get_request_context)):
+        """List the extra ids this bank answers to."""
+        try:
+            aliases = await app.state.memory.list_bank_aliases(bank_id, request_context=request_context)
+            return BankAliasesResponse(bank_id=bank_id, aliases=aliases)
+        except OperationValidationError as e:
+            raise HTTPException(status_code=e.status_code, detail=e.reason)
+        except (AuthenticationError, HTTPException):
+            raise
+        except Exception as e:
+            raise _internal_error(e, f"/v1/default/banks/{bank_id}/aliases")
+
+    @app.post(
+        "/v1/default/banks/{bank_id}/aliases",
+        response_model=BankAliasesResponse,
+        status_code=201,
+        summary="Add an alias to the bank",
+        description=(
+            "Give the bank another id to answer to. Nothing is copied or moved: the bank keeps its "
+            "own id and all of its data, and the alias is only a second way to reach it — which is "
+            "what makes it a zero-downtime alternative to renaming.\n\n"
+            "Returns 409 if the name is already a bank or another alias."
+        ),
+        operation_id="create_bank_alias",
+        tags=["Banks"],
+    )
+    @audited("create_bank_alias")
+    async def api_create_bank_alias(
+        bank_id: str, request: CreateBankAliasRequest, request_context: RequestContext = Depends(get_request_context)
+    ):
+        """Add an extra id that reaches this bank."""
+        try:
+            await app.state.memory.create_bank_alias(bank_id, request.alias, request_context=request_context)
+            aliases = await app.state.memory.list_bank_aliases(bank_id, request_context=request_context)
+            return BankAliasesResponse(bank_id=bank_id, aliases=aliases)
+        except OperationValidationError as e:
+            raise HTTPException(status_code=e.status_code, detail=e.reason)
+        except (AuthenticationError, HTTPException):
+            raise
+        except Exception as e:
+            raise _internal_error(e, f"/v1/default/banks/{bank_id}/aliases")
+
+    @app.delete(
+        "/v1/default/banks/{bank_id}/aliases/{alias}",
+        response_model=BankAliasesResponse,
+        summary="Remove an alias from the bank",
+        description=(
+            "Stop an id reaching this bank. The bank and its memories are untouched; only the extra "
+            "name goes away, and callers still using it get the same 404 (or new empty bank) they "
+            "would have got before it existed."
+        ),
+        operation_id="delete_bank_alias",
+        tags=["Banks"],
+    )
+    @audited("delete_bank_alias")
+    async def api_delete_bank_alias(
+        bank_id: str, alias: str, request_context: RequestContext = Depends(get_request_context)
+    ):
+        """Detach one alias from this bank."""
+        try:
+            if not await app.state.memory.delete_bank_alias(bank_id, alias, request_context=request_context):
+                raise HTTPException(status_code=404, detail=f"Bank '{bank_id}' has no alias '{alias}'")
+            aliases = await app.state.memory.list_bank_aliases(bank_id, request_context=request_context)
+            return BankAliasesResponse(bank_id=bank_id, aliases=aliases)
+        except OperationValidationError as e:
+            raise HTTPException(status_code=e.status_code, detail=e.reason)
+        except (AuthenticationError, HTTPException):
+            raise
+        except Exception as e:
+            raise _internal_error(e, f"/v1/default/banks/{bank_id}/aliases/{alias}")
+
     @app.put(
         "/v1/default/banks/{bank_id}",
         response_model=BankProfileResponse,
@@ -8353,10 +8574,7 @@ def _register_routes(app: FastAPI):
             # right after a config edit must not carry the values that edit replaced.
             bank_overrides = await app.state.memory._config_resolver._load_bank_config(bank_id, cached=False)
 
-            # Filter to only BankTemplateConfig fields (exclude credentials, static fields)
-            template_config_fields = set(BankTemplateConfig.model_fields.keys())
-            filtered_overrides = {k: v for k, v in bank_overrides.items() if k in template_config_fields}
-            bank_config = BankTemplateConfig(**filtered_overrides) if filtered_overrides else None
+            bank_config = _bank_template_config_from_overrides(bank_overrides)
 
             # Get mental models (limit=None — an export that stopped at the
             # default page size would silently drop the rest of the bank).
@@ -9063,7 +9281,7 @@ def _register_routes(app: FastAPI):
         try:
             return await app.state.memory.preview_consolidation_strategies(
                 bank_id,
-                request.strategies,
+                [strategy.model_dump() for strategy in request.strategies],
                 sample_limit=request.sample_limit,
                 request_context=request_context,
             )
