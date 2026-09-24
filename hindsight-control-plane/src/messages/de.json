@@ -57,7 +57,8 @@
       "switchTitle": "Speicherbank wechseln",
       "returnTo": "Zurück zu {bank}",
       "copyName": "Name kopieren",
-      "copied": "In Zwischenablage kopiert"
+      "copied": "In Zwischenablage kopiert",
+      "viaAlias": "über {aliases}"
     },
     "viewOnGitHub": "Auf GitHub ansehen"
   },
@@ -251,6 +252,20 @@
     "create": "Erstellen",
     "save": "Speichern"
   },
+  "bankAliases": {
+    "title": "Aliasse",
+    "description": "Zusätzliche IDs, die ebenfalls <name>{bankId}</name> erreichen, damit Aufrufer ohne Ausfallzeit auf eine neue ID wechseln können.",
+    "placeholder": "Neue ID",
+    "add": "Hinzufügen",
+    "removeAria": "Alias {alias} entfernen",
+    "removeTitle": "Alias {alias} entfernen?",
+    "removeConfirm": "Jede Anwendung, die noch über {alias} verbunden ist, funktioniert sofort nicht mehr. Nur diese ID verschwindet – {bankId} und die Erinnerungen bleiben unberührt, und Sie können den Alias wieder hinzufügen.",
+    "remove": "Alias entfernen",
+    "cancel": "Abbrechen",
+    "loadFailed": "Aliasse konnten nicht geladen werden",
+    "addFailed": "Alias konnte nicht hinzugefügt werden",
+    "removeFailed": "Alias konnte nicht entfernt werden"
+  },
   "bankStats": {
     "memoryStore": "Speicher",
     "memories": "Erinnerungen",
@@ -427,8 +442,8 @@
     "empathyDescription": "Wie stark emotionaler Kontext gewichtet wird",
     "empathyLowLabel": "Distanziert",
     "empathyHighLabel": "Empathisch",
-    "mcpToolsTitle": "MCP Tools",
-    "mcpToolsDescription": "Einschränken, welche MCP-Tools diese Bank für Agenten bereitstellt",
+    "clientsTitle": "Clients",
+    "clientsDescription": "Worauf Apps und Agenten bei dieser Bank zugreifen können.",
     "mcpFailedToSave": "MCP-Einstellungen konnten nicht gespeichert werden",
     "auditEnabledLabel": "Audit-Protokollierung aktivieren",
     "auditEnabledDescription": "Retain-, Recall- und Reflect-Operationen für diesen Speicher aufzeichnen. Überschreibt die Server-Voreinstellung nur für diesen Speicher.",
@@ -578,7 +593,7 @@
     "memoryDefenseEnterpriseFeatureSizeAnomaly": "Größenanomalie: lehnt verdächtig große Nutzlasten ab",
     "memoryDefenseEnterpriseFeatureProtectedKeys": "Geschützte Tag-Namespaces: erzwingt unveränderliche Identitäts-Tags",
     "memoryDefenseEnterpriseCta": "Demo anfragen",
-    "recallTitle": "Recall-Pipeline",
+    "recallTitle": "Recall",
     "recallDescription": "Welche Abrufphasen beim Recall für diesen Speicher ausgeführt werden",
     "recallServerDefault": "Serverstandard",
     "recallFailedToSave": "Recall-Pipeline-Einstellungen konnten nicht gespeichert werden",
@@ -1075,7 +1090,10 @@
     "triggerSeconds": "Sekunden",
     "triggerMinIntervalLabel": "Minimales Aktualisierungsintervall",
     "toastContentCleared": "Inhalt des mentalen Modells gelöscht",
-    "actionOpenDetail": "Öffnen"
+    "actionOpenDetail": "Öffnen",
+    "nextRefreshPaused": "pausiert nach fehlgeschlagener Aktualisierung",
+    "nextRefreshRetrying": "Wiederholung, nächster Versuch {time}",
+    "nextRefreshRunning": "wird gerade aktualisiert"
   },
   "cronPreview": {
     "invalid": "Ungültiger Cron-Ausdruck",
@@ -1737,9 +1755,12 @@
     "failureAttempts": "· {count} Versuche",
     "tabErrors": "Fehler",
     "noErrors": "Keine fehlgeschlagenen Aktualisierungen.",
-    "errorsIntro": "Aktualisierungen, die nicht geschrieben haben – neueste zuerst. Der gespeicherte Inhalt blieb dabei jeweils unberührt. Eine fehlgeschlagene Aktualisierung wird einige Male automatisch wiederholt; danach behält das Modell seine letzte gültige Version, bis es erneut ausgelöst wird.",
+    "errorsIntro": "Aktualisierungen, die nicht geschrieben haben – neueste zuerst. Der gespeicherte Inhalt blieb dabei jeweils unangetastet. Eine fehlgeschlagene Aktualisierung wird einige Male automatisch wiederholt; danach behält das Modell seine letzte gute Version.",
     "errorsPresent": "Dieses Mental Model hat fehlgeschlagene Aktualisierungen",
-    "failureReasonUnexpected": "Unerwarteter Fehler"
+    "failureReasonUnexpected": "Unerwarteter Fehler",
+    "refreshPaused": "Aktualisierung pausiert",
+    "errorsPausedNotice": "Dieses Modell aktualisiert sich nicht mehr selbst: Nach diesen Fehlschlägen sind seine automatischen Aktualisierungen pausiert. Aktualisieren Sie es, um es erneut zu versuchen – eine erfolgreiche Aktualisierung setzt sie fort.",
+    "noHistoryOnlyFailures": "Noch keine Versionen – bisher ist jede Aktualisierung fehlgeschlagen. Siehe Tab „Fehler“."
   },
   "constellation": {
     "instructions": "Scrollen zum Zoomen · Ziehen zum Verschieben · Hover zum Erkunden · Klicken zum Auswählen",
@@ -1929,6 +1950,11 @@
         "fetch": "Bankkonfiguration konnte nicht abgerufen werden",
         "update": "Bankkonfiguration konnte nicht aktualisiert werden",
         "reset": "Bankkonfiguration konnte nicht zurückgesetzt werden"
+      },
+      "bankAliases": {
+        "list": "Bank-Aliasse konnten nicht aufgelistet werden",
+        "create": "Bank-Alias konnte nicht erstellt werden",
+        "delete": "Bank-Alias konnte nicht gelöscht werden"
       },
       "memories": {
         "list": "Speichereinheiten konnten nicht aufgelistet werden",
@@ -2164,6 +2190,10 @@
     "inSync": "Aktuell",
     "staleAutoTitle": "Neue Erinnerungen im Bereich dieses Modells (wird automatisch aktualisiert)",
     "staleManualTitle": "Neue Erinnerungen vorhanden (manuell aktualisieren zum Abgleichen)",
-    "inSyncTitle": "Keine neuen Erinnerungen im Bereich dieses Modells vorhanden"
+    "inSyncTitle": "Keine neuen Erinnerungen im Bereich dieses Modells vorhanden",
+    "paused": "Pausiert",
+    "pausedTitle": "Die letzte Aktualisierung ist fehlgeschlagen, daher aktualisiert sich dieses Modell nicht mehr selbst – aktualisieren Sie es, um fortzufahren",
+    "retrying": "Wiederholung",
+    "retryingTitle": "Der letzte Versuch ist fehlgeschlagen, ein weiterer steht an – automatische Aktualisierungen stoppen nur, wenn auch dieser fehlschlägt"
   }
 }
