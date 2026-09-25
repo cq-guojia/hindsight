@@ -23,6 +23,8 @@ var _ MappedNullable = &CreateBankAliasRequest{}
 type CreateBankAliasRequest struct {
 	// The extra bank id. Same rules as a bank id (non-empty, at most 192 bytes of UTF-8, no control characters), and it must not already name a bank or another alias.
 	Alias string `json:"alias"`
+	// Also show the bank under this alias, replacing whichever alias is shown today.
+	Primary *bool `json:"primary,omitempty"`
 }
 
 type _CreateBankAliasRequest CreateBankAliasRequest
@@ -34,6 +36,8 @@ type _CreateBankAliasRequest CreateBankAliasRequest
 func NewCreateBankAliasRequest(alias string) *CreateBankAliasRequest {
 	this := CreateBankAliasRequest{}
 	this.Alias = alias
+	var primary bool = false
+	this.Primary = &primary
 	return &this
 }
 
@@ -42,6 +46,8 @@ func NewCreateBankAliasRequest(alias string) *CreateBankAliasRequest {
 // but it doesn't guarantee that properties required by API are set
 func NewCreateBankAliasRequestWithDefaults() *CreateBankAliasRequest {
 	this := CreateBankAliasRequest{}
+	var primary bool = false
+	this.Primary = &primary
 	return &this
 }
 
@@ -69,6 +75,38 @@ func (o *CreateBankAliasRequest) SetAlias(v string) {
 	o.Alias = v
 }
 
+// GetPrimary returns the Primary field value if set, zero value otherwise.
+func (o *CreateBankAliasRequest) GetPrimary() bool {
+	if o == nil || IsNil(o.Primary) {
+		var ret bool
+		return ret
+	}
+	return *o.Primary
+}
+
+// GetPrimaryOk returns a tuple with the Primary field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *CreateBankAliasRequest) GetPrimaryOk() (*bool, bool) {
+	if o == nil || IsNil(o.Primary) {
+		return nil, false
+	}
+	return o.Primary, true
+}
+
+// HasPrimary returns a boolean if a field has been set.
+func (o *CreateBankAliasRequest) HasPrimary() bool {
+	if o != nil && !IsNil(o.Primary) {
+		return true
+	}
+
+	return false
+}
+
+// SetPrimary gets a reference to the given bool and assigns it to the Primary field.
+func (o *CreateBankAliasRequest) SetPrimary(v bool) {
+	o.Primary = &v
+}
+
 func (o CreateBankAliasRequest) MarshalJSON() ([]byte, error) {
 	toSerialize,err := o.ToMap()
 	if err != nil {
@@ -80,6 +118,9 @@ func (o CreateBankAliasRequest) MarshalJSON() ([]byte, error) {
 func (o CreateBankAliasRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["alias"] = o.Alias
+	if !IsNil(o.Primary) {
+		toSerialize["primary"] = o.Primary
+	}
 	return toSerialize, nil
 }
 
