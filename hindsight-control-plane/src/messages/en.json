@@ -257,6 +257,9 @@
     "description": "Extra ids that also reach <name>{bankId}</name>, so callers can move to a new id without downtime.",
     "placeholder": "New id",
     "add": "Add",
+    "shownAsLabel": "Shown as",
+    "shownAsDescription": "Which id the control plane displays for this bank. Cosmetic only — {bankId} stays its identity everywhere else.",
+    "primaryTitle": "Shown in place of the bank id",
     "removeAria": "Remove alias {alias}",
     "removeTitle": "Remove alias {alias}?",
     "removeConfirm": "Every application still connected through {alias} will stop working immediately. Only this id goes away — {bankId} and its memories are untouched, and you can add the alias back.",
@@ -264,6 +267,7 @@
     "cancel": "Cancel",
     "loadFailed": "Failed to load aliases",
     "addFailed": "Failed to add alias",
+    "primaryFailed": "Failed to change which id is shown",
     "removeFailed": "Failed to remove alias"
   },
   "bankStats": {
@@ -280,6 +284,7 @@
     "temporal": "Temporal",
     "semantic": "Semantic",
     "entity": "Entity",
+    "causal": "Causal",
     "noLinksYet": "No links yet",
     "consolidation": "Consolidation",
     "testLlm": "Test LLM connection",
@@ -1253,7 +1258,7 @@
     "errorRunningSearch": "Error running search",
     "tooltipCrossEncoder": "Cross-encoder score (primary relevance signal)",
     "tooltipTemporal": "Temporal proximity boost (±10% — only active for temporal queries)",
-    "tooltipRecency": "Recency boost (±10% — based on memory age)",
+    "tooltipRecency": "Recency boost (±10% — based on time decay)",
     "temporalWindowLabel": "Time window",
     "helpTypes": "Which memory layers to search: world facts, the bank's own experiences, and consolidated observations.",
     "helpBudget": "How hard recall searches. A higher budget explores more candidates and graph links: better recall, more latency.",
@@ -1419,6 +1424,7 @@
     "cumulative": "Cumulative",
     "tokensInput": "Input",
     "tokensOutput": "Output",
+    "tokensThoughts": "Reasoning",
     "tokensCached": "Cached",
     "tokensTotal": "Total",
     "tableHeaderTokens": "Tokens",
@@ -1664,7 +1670,7 @@
     "errorPrefix": "Error: {error}"
   },
   "mentalModelDetailModal": {
-    "noBasedOnData": "No based_on data.",
+    "noBasedOnData": "No basis data available.",
     "viewArrow": "View →",
     "unchanged": "unchanged",
     "diffBefore": "Before",
@@ -1954,7 +1960,8 @@
       "bankAliases": {
         "list": "Failed to list bank aliases",
         "create": "Failed to create bank alias",
-        "delete": "Failed to delete bank alias"
+        "delete": "Failed to delete bank alias",
+        "update": "Failed to update bank alias"
       },
       "memories": {
         "list": "Failed to list memory units",

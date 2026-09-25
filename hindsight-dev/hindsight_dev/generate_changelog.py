@@ -162,6 +162,7 @@ INTEGRATIONS: dict[str, IntegrationMeta] = {
     "dify": IntegrationMeta("hindsight-dify", "Dify"),
     "vapi": IntegrationMeta("hindsight-vapi", "Vapi"),
     "gemini-spark": IntegrationMeta("hindsight-gemini-spark", "Gemini Spark"),
+    "meta-muse": IntegrationMeta("hindsight-meta-muse", "Meta Muse"),
     "flowise": IntegrationMeta("@vectorize-io/flowise-nodes-hindsight", "Flowise"),
     "google-adk": IntegrationMeta("hindsight-google-adk", "Google ADK"),
     "superagent": IntegrationMeta("hindsight-superagent", "Superagent"),
@@ -859,6 +860,14 @@ def build_changelog_markdown(
 
     # Build markdown
     lines = [f"## [{version}]({tag_url})", ""]
+
+    # Integrations that install from git are pinned by commit, not by version: the Hermes catalog
+    # pins a sha, and `hermes plugins install --ref` takes a full 40-character sha and rejects tag
+    # names outright. The release's own sha cannot be printed here — this file is written *before*
+    # the release commit that contains it exists — so link the commits page at the tag, where the
+    # top entry is that commit and GitHub offers its full hash.
+    if integration:
+        lines += [f"[Commits in this release →](https://github.com/{GITHUB_REPO}/commits/{tag})", ""]
 
     has_entries = False
     for cat_key in ["breaking", "feature", "improvement", "bugfix", "other"]:

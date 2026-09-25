@@ -19,6 +19,7 @@ import json
 
 from pydantic import BaseModel, ConfigDict, Field, StrictStr
 from typing import Any, ClassVar, Dict, List
+from hindsight_client_api.models.bank_alias_entry import BankAliasEntry
 from typing import Optional, Set
 from typing_extensions import Self
 
@@ -27,7 +28,7 @@ class BankAliasesResponse(BaseModel):
     Response model for a bank's aliases.
     """ # noqa: E501
     bank_id: StrictStr = Field(description="The bank's own id, which an alias never replaces")
-    aliases: List[StrictStr] = Field(description="Extra ids that also reach this bank, oldest first")
+    aliases: List[BankAliasEntry] = Field(description="Extra ids that also reach this bank, the primary one first then oldest first")
     __properties: ClassVar[List[str]] = ["bank_id", "aliases"]
 
     model_config = ConfigDict(
@@ -69,6 +70,13 @@ class BankAliasesResponse(BaseModel):
             exclude=excluded_fields,
             exclude_none=True,
         )
+        # override the default output from pydantic by calling `to_dict()` of each item in aliases (list)
+        _items = []
+        if self.aliases:
+            for _item_aliases in self.aliases:
+                if _item_aliases:
+                    _items.append(_item_aliases.to_dict())
+            _dict['aliases'] = _items
         return _dict
 
     @classmethod
@@ -82,7 +90,7 @@ class BankAliasesResponse(BaseModel):
 
         _obj = cls.model_validate({
             "bank_id": obj.get("bank_id"),
-            "aliases": obj.get("aliases")
+            "aliases": [BankAliasEntry.from_dict(_item) for _item in obj["aliases"]] if obj.get("aliases") is not None else None
         })
         return _obj
 
