@@ -49,6 +49,7 @@ import { isOurMcpEntry } from "./core/util";
 import { SKILL_DIRS, resolveSkillDirs, traecodeDotDirName } from "./core/skill-dirs";
 import {
   enableWorkspaceMcpSetting,
+  gateStateFileFor,
   ensureWorkspaceMcpEnabled,
   markWorkspaceMcpEnabled,
   registerTraecodeWorkspaceMcp,
@@ -119,9 +120,21 @@ export interface InstallCtx {
   ) => number | null | undefined;
 }
 
+function isPlainObject(value: unknown): value is Record<string, any> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/**
+ * JSON.parse accepts non-object top-level values (`[]`, `null`, a number), and every caller here
+ * treats the result as an object it can index and merge into — an array config would be written
+ * back out as an array, quietly replacing the host's file with something it cannot load. A
+ * top-level value that is not a plain object is as broken as an unparseable file, so both fall
+ * back to `{}`.
+ */
 function readJson(path: string): Record<string, any> {
   try {
-    return JSON.parse(readFileSync(path, "utf8"));
+    const parsed = JSON.parse(readFileSync(path, "utf8"));
+    return isPlainObject(parsed) ? parsed : {};
   } catch {
     return {};
   }
@@ -251,6 +264,12 @@ function mergeHarnessHooks(
   dist: string
 ): void {
   const spec = HOOK_HARNESSES[harness];
+  // A harness whose hooks live outside the two JSON shapes must never reach the generic
+  // writer: the ternary below would silently take the FLAT branch and emit a JSON block
+  // into a file that host never reads. tsc cannot catch that, so fail loudly here.
+  if (spec.configStyle === "toml-array")
+    throw new Error(`${harness} writes its own TOML hook block; mergeHarnessHooks cannot emit it`);
+
   const installedEvents = new Set<string>();
   for (const hook of [...Object.values(spec.install), ...(spec.additionalHooks ?? [])]) {
     // Antigravity has no SessionStart event. Its first PreInvocation performs the same seed guard,
@@ -1363,6 +1382,15 @@ function stripUnmarkedGrokEntries(toml: string): string {
     .replace(/\n{3,}/g, "\n\n");
 }
 
+/**
+ * Grok Build reads hooks from `~/.grok/hooks/*.json` (Claude's nested matcher-group shape) and
+ * from `[[hooks.<Event>]]` tables in config.toml. Both load, but Grok's config validator does not
+ * know the `hooks` key, so every `grok inspect` flags a config.toml hook block as an
+ * "unrecognized config key". The hooks directory is the documented global location and draws no
+ * warning, so the hooks live in a file this package owns; config.toml keeps only the MCP server.
+ */
+const grokHooksPath = (c: InstallCtx) => join(c.home, ".grok", "hooks", "hindsight.json");
+
 const grok: HarnessInstaller = {
   name: "grok-build",
   detect: (c) => onPath("grok") || existsSync(join(c.home, ".grok")),
@@ -1371,7 +1399,8 @@ const grok: HarnessInstaller = {
     const existing = existsSync(path) ? readFileSync(path, "utf8") : "";
     // REPLACE any previous block rather than skipping when one exists. Skipping made this
     // install-once-only: after the package moved, a re-install silently left the old (now dead)
-    // paths in place, which is exactly the case `install` is meant to repair.
+    // paths in place, which is exactly the case `install` is meant to repair. Replacing also
+    // drops the hook tables older releases kept in this block.
     const stripped = existing.replace(GROK_BLOCK_RE, "\n");
     // Entries an older release wrote WITHOUT the markers must go too: TOML forbids redefining a
     // table, so appending on top of them leaves a file Grok cannot parse — it then reports "No MCP
@@ -1379,15 +1408,9 @@ const grok: HarnessInstaller = {
     const withoutOurs = hasUnmarkedGrokEntries(stripped)
       ? stripUnmarkedGrokEntries(stripped)
       : stripped;
-    // Grok executes this shell command verbatim. Quote the absolute script path so a globally
-    // installed package still works when its installation directory contains spaces.
-    const command = (entry: string) => JSON.stringify(`node "${join(c.dist, entry)}"`);
     const tomlString = (value: string) => JSON.stringify(value);
     const block =
       `\n${GROK_MARKER_START}\n` +
-      `[[hooks.SessionStart]]\n  [[hooks.SessionStart.hooks]]\n  type = \"command\"\n  command = ${command("grok-sessionstart-hook.js")}\n  timeout = 30\n\n` +
-      `[[hooks.UserPromptSubmit]]\n  [[hooks.UserPromptSubmit.hooks]]\n  type = \"command\"\n  command = ${command("grok-hook.js")}\n  timeout = 30\n\n` +
-      `[[hooks.Stop]]\n  [[hooks.Stop.hooks]]\n  type = \"command\"\n  command = ${command("grok-stop-hook.js")}\n  timeout = 60\n\n` +
       `[mcp_servers.hindsight]\ncommand = \"node\"\nargs = [${tomlString(join(c.dist, "mcp-server.js"))}]\n` +
       `env = { HINDSIGHT_MCP_HARNESS = \"grok-build\" }\n${GROK_MARKER_END}\n`;
     const next = `${withoutOurs.replace(/\n*$/, "\n")}${block}`;
@@ -1403,8 +1426,14 @@ const grok: HarnessInstaller = {
       copyFileSync(path, `${path}.hindsight-backup`);
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, next);
+
+    const hooksPath = grokHooksPath(c);
+    const file = readJson(hooksPath);
+    const hooks = isPlainObject(file.hooks) ? file.hooks : {};
+    mergeHarnessHooks(hooks, "grok-build", c.dist);
+    writeJson(hooksPath, { ...file, hooks });
     installSkill(c, "grok-build");
-    c.log?.(`grok-build: native hooks + MCP installed in ${path}`);
+    c.log?.(`grok-build: hooks installed in ${hooksPath}, MCP in ${path}`);
   },
   uninstall(c) {
     const path = join(c.home, ".grok", "config.toml");
@@ -1419,8 +1448,90 @@ const grok: HarnessInstaller = {
       const safe = parseGrokToml(cleaned) !== null || parseGrokToml(existing) === null;
       if (cleaned !== existing && safe) writeFileSync(path, cleaned);
     }
+    const hooksPath = grokHooksPath(c);
+    if (existsSync(hooksPath)) {
+      const file = readJson(hooksPath);
+      if (isPlainObject(file.hooks)) {
+        stripHarnessHooks(file.hooks, "grok-build");
+        if (!Object.keys(file.hooks).length) delete file.hooks;
+      }
+      if (Object.keys(file).length) writeJson(hooksPath, file);
+      else rmSync(hooksPath);
+    }
     uninstallSkill(c, "grok-build");
     c.log?.("grok-build: native hooks + MCP + skill removed");
+  },
+};
+
+const KIMI_MARKER_START = "# HINDSIGHT_CODING_AGENTS_KIMI_START";
+const KIMI_MARKER_END = "# HINDSIGHT_CODING_AGENTS_KIMI_END";
+const KIMI_BLOCK_RE = new RegExp(`\\n?${KIMI_MARKER_START}[\\s\\S]*?${KIMI_MARKER_END}\\n?`);
+
+/**
+ * Kimi Code home — `$KIMI_CODE_HOME`, else `~/.kimi-code`, the CLI's own resolution order. The
+ * transcript reader resolves sessions the same way (core/transcript-kimi.ts); installing anywhere
+ * else would write hooks into a config.toml the CLI never loads.
+ */
+function kimiHome(c: InstallCtx): string {
+  return process.env.KIMI_CODE_HOME || join(c.home, ".kimi-code");
+}
+
+const kimi: HarnessInstaller = {
+  name: "kimi-code",
+  detect: (c) => onPath("kimi") || existsSync(kimiHome(c)),
+  install(c) {
+    const path = join(kimiHome(c), "config.toml");
+    const existing = existsSync(path) ? readFileSync(path, "utf8") : "";
+    // Replace a previous block rather than skipping when one exists, so a re-install repairs
+    // paths that moved with the package (the grok-build precedent).
+    const withoutOurs = existing.replace(KIMI_BLOCK_RE, "\n");
+    // Kimi validates every [[hooks]] entry against a STRICT 4-key schema
+    // (event / matcher / command / timeout). One unknown key does not drop that entry — it
+    // drops EVERY hook in the file, at warning severity only. So emit those keys and nothing
+    // else, and take the values from the lifecycle spec so the installed hooks can never
+    // diverge from the ones the runtime entrypoints implement.
+    const spec = HOOK_HARNESSES["kimi-code"];
+    const entries = Object.values(spec.install)
+      .map(
+        (h) =>
+          `[[hooks]]\nevent = ${JSON.stringify(h.event)}\n` +
+          `command = ${JSON.stringify(`node "${join(c.dist, h.entry)}"`)}\n` +
+          `timeout = ${h.timeout}\n`
+      )
+      .join("\n");
+    const block = `\n${KIMI_MARKER_START}\n${entries}${KIMI_MARKER_END}\n`;
+    if (existsSync(path) && !existsSync(`${path}.hindsight-backup`))
+      copyFileSync(path, `${path}.hindsight-backup`);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, `${withoutOurs.replace(/\n*$/, "\n")}${block}`);
+    // Kimi keeps MCP registration in its own mcp.json, not config.toml. Register the packaged
+    // stdio server: it reads the endpoint and token from ~/.hindsight/coding-agent.json, so the
+    // entry needs no bearerTokenEnvVar. An http entry would need HINDSIGHT_API_KEY exported into
+    // Kimi's environment, and silently 401s when it is not.
+    const mcpPath = join(kimiHome(c), "mcp.json");
+    const mcp = readJson(mcpPath);
+    mcp.mcpServers = { ...(mcp.mcpServers ?? {}), hindsight: mcpServerEntry(c.dist, "kimi-code") };
+    writeJson(mcpPath, mcp);
+    installSkill(c, "kimi-code");
+    c.log?.(`kimi-code: native hooks installed in ${path}, MCP in ${mcpPath}`);
+  },
+  uninstall(c) {
+    const path = join(kimiHome(c), "config.toml");
+    if (existsSync(path)) {
+      const existing = readFileSync(path, "utf8");
+      const cleaned = existing.replace(KIMI_BLOCK_RE, "\n");
+      if (cleaned !== existing) writeFileSync(path, cleaned);
+    }
+    const mcpPath = join(kimiHome(c), "mcp.json");
+    if (existsSync(mcpPath)) {
+      const mcp = readJson(mcpPath);
+      if (mcp.mcpServers?.hindsight) {
+        delete mcp.mcpServers.hindsight;
+        writeJson(mcpPath, mcp);
+      }
+    }
+    uninstallSkill(c, "kimi-code");
+    c.log?.("kimi-code: native hooks + MCP + skill removed");
   },
 };
 
@@ -1964,7 +2075,9 @@ function ensureTraecodeWorkspaceMcpGate(c: InstallCtx): void {
     }
   }
   if (enableWorkspaceMcpSetting(settingsPath)) {
-    markWorkspaceMcpEnabled();
+    // The hooks run from the staged runtime (c.dist), not from this installer's own copy of the
+    // package, so the witness goes where THEY look for it.
+    markWorkspaceMcpEnabled({ stateFile: gateStateFileFor(c.dist) });
     c.log?.(
       `traecode: workspace MCP enabled in ${settingsPath} — restart Trae windows to pick it up`
     );
@@ -2158,6 +2271,7 @@ export const INSTALLERS: HarnessInstaller[] = [
   copilot,
   grok,
   qwen,
+  kimi,
   cline,
   dcode,
   dsh,

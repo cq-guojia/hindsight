@@ -18,6 +18,7 @@ import { dcodeAssistantText, readDcodeTranscript } from "../core/transcript-dcod
 import { readQwenTranscript } from "../core/transcript-qwen";
 import { readDroidTranscript } from "../core/transcript-droid";
 import { zcodeAssistantText } from "../core/transcript-zcode";
+import { kimiPromptText, kimiSessionDir, readKimiTranscript } from "../core/transcript-kimi";
 
 export type HookHarnessName =
   | "claude-code"
@@ -31,7 +32,8 @@ export type HookHarnessName =
   | "qwen-code"
   | "factory-droid"
   | "zcode"
-  | "traecode";
+  | "traecode"
+  | "kimi-code";
 export type HookLifecycle = "sessionStart" | "prompt" | "stop";
 /**
  * How the HOST spells one hook registration.
@@ -41,8 +43,11 @@ export type HookLifecycle = "sessionStart" | "prompt" | "stop";
  *             (`type:"process"`, `command:"node"`, `args:[...]`) and the budget is `timeoutMs`.
  *             The split matters: ZCode spawns without a shell, so a quoted command string is
  *             looked up verbatim as an executable name and never runs.
+ *   toml-array — Kimi Code's flat `[[hooks]]` array of tables, whose entry schema is strict
+ *             (event/matcher/command/timeout); a fifth key drops EVERY hook in the file, so
+ *             its installer writes the block itself. See the installer's kimi adapter.
  */
-export type HookConfigStyle = "nested" | "flat" | "process";
+export type HookConfigStyle = "nested" | "flat" | "process" | "toml-array";
 
 export interface HookInstallSpec {
   event: string;
@@ -223,6 +228,14 @@ const standardSessionStart = (harness: string): SessionStartHookSpec => ({
   }),
 });
 
+/**
+ * Grok Build also runs the hooks in ~/.claude/settings.json (its Claude compatibility layer), so
+ * without this gate every Grok session would run Claude Code's hooks next to Grok's own: a second
+ * SessionStart injection, a second recall per prompt, and a retain tagged claude-code. Grok's hook
+ * runner sets the reserved GROK_HOOK_EVENT on every hook process; Claude Code never does.
+ */
+const notGrokHosted = (): boolean => !process.env.GROK_HOOK_EVENT;
+
 export const HOOK_HARNESSES: Record<HookHarnessName, HookHarnessSpec> = {
   "claude-code": {
     configStyle: "nested",
@@ -231,11 +244,12 @@ export const HOOK_HARNESSES: Record<HookHarnessName, HookHarnessSpec> = {
       prompt: { event: "UserPromptSubmit", entry: "claude-hook.js", timeout: 30 },
       stop: { event: "Stop", entry: "claude-stop-hook.js", timeout: 60 },
     },
-    sessionStart: standardSessionStart("claude-code"),
-    prompt: claudePrompt,
+    sessionStart: { ...standardSessionStart("claude-code"), accept: notGrokHosted },
+    prompt: { ...claudePrompt, accept: notGrokHosted },
     retain: {
       hostTimeoutSec: 60,
       harness: "claude-code",
+      accept: notGrokHosted,
       parse: (ev) => ({
         sessionId: ev.session_id as string | undefined,
         transcriptPath: ev.transcript_path as string | undefined,
@@ -617,6 +631,63 @@ export const HOOK_HARNESSES: Record<HookHarnessName, HookHarnessSpec> = {
         // `last_assistant_message` is the full reply — TraeCode's `responseText`.
         assistantText: (ev) => ((ev.last_assistant_message as string | undefined) ?? "").trim(),
       },
+    },
+  },
+  "kimi-code": {
+    // Kimi's ~/.kimi-code/config.toml takes a FLAT [[hooks]] array whose entries are validated by a
+    // strict 4-key schema (event/matcher/command/timeout). Neither JSON style can express it, and a
+    // fifth key drops EVERY hook in the file at warning severity, so its installer writes the block
+    // itself (the grok-build pattern) rather than going through mergeHarnessHooks.
+    configStyle: "toml-array",
+    install: {
+      // Timeouts are SECONDS here (integer 1-600, default 30) — the same unit as every other
+      // supported host, and the opposite of qwen-code's identically named field.
+      sessionStart: { event: "SessionStart", entry: "kimi-sessionstart-hook.js", timeout: 30 },
+      prompt: { event: "UserPromptSubmit", entry: "kimi-hook.js", timeout: 30 },
+      stop: { event: "Stop", entry: "kimi-stop-hook.js", timeout: 60 },
+    },
+    sessionStart: {
+      harness: "kimi-code",
+      parse: (ev) => ({
+        cwd: ev.cwd as string | undefined,
+        sessionId: ev.session_id as string | undefined,
+      }),
+      // Kimi runs SessionStart hooks for their side effects only: it awaits the trigger and drops
+      // the result, so nothing emitted here can reach the model or the terminal. Installed for the
+      // seed/daemon/session-root work runSessionStartHook does, and silent like antigravity-cli's.
+      emit: () => ({}),
+    },
+    prompt: {
+      harness: "kimi-code",
+      parse: (ev) => ({
+        // A block array, not a string — the same shape as the wire log's `turn.prompt.input`.
+        prompt: kimiPromptText(ev.prompt),
+        cwd: ev.cwd as string | undefined,
+        sessionId: ev.session_id as string | undefined,
+      }),
+      // Kimi has no additionalContext: a top-level `message` is the injection channel, which the
+      // CLI wraps as <hook_result hook_event="UserPromptSubmit"> and appends to the conversation.
+      // `notice` has no banner channel to reach (the copilot-cli precedent), but it cannot simply
+      // be dropped: when a hook's stdout parses to JSON carrying no message, Kimi falls back to
+      // injecting the RAW STDOUT, so an empty `{}` would put a literal "{}" in front of the model.
+      // Emitting the notice on the notice-only turn is what keeps that from ever happening.
+      emit: (context, notice) => ({ message: context || notice }),
+    },
+    retain: {
+      hostTimeoutSec: 60,
+      harness: "kimi-code",
+      parse: (ev) => {
+        const sessionId = ev.session_id as string | undefined;
+        return {
+          sessionId,
+          // Kimi's Stop payload carries no transcript path — its hook feature has no such field at
+          // all — so resolve the session's own directory from the id, as grok-build does. The
+          // reader takes that DIRECTORY and reads every agent's wire.jsonl beneath it.
+          transcriptPath: sessionId ? kimiSessionDir(sessionId) : undefined,
+          cwd: ev.cwd as string | undefined,
+        };
+      },
+      readTranscript: readKimiTranscript,
     },
   },
 };

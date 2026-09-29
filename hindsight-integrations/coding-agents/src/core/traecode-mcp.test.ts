@@ -32,6 +32,10 @@ afterAll(() => {
   }
 });
 
+/** Hint rate-limit state for the calls below that do not test it — never the package's own file,
+ *  which a real runtime reads and a leaked timestamp would silence. */
+const STATE = join(mkdtempSync(join(tmpdir(), "hs-trae-state-")), "state.json");
+
 /** Mirrors traecodeUserDataDir's root choice (env pinned by the beforeAll above). */
 const userDataRoot = (home: string) =>
   process.platform === "darwin"
@@ -76,7 +80,7 @@ describe("ensureTraecodeWorkspaceMcp", () => {
 
   it("writes the workspace registration when the file is absent", () => {
     const { repo: r, dist, home } = repo();
-    ensureTraecodeWorkspaceMcp(r, { dist, home });
+    ensureTraecodeWorkspaceMcp(r, { dist, home, stateFile: STATE });
     const doc = readJson(r);
     expect(doc.mcpServers.hindsight).toEqual({
       command: "node",
@@ -87,9 +91,9 @@ describe("ensureTraecodeWorkspaceMcp", () => {
 
   it("is idempotent: a second run rewrites nothing", () => {
     const { repo: r, dist, home } = repo();
-    ensureTraecodeWorkspaceMcp(r, { dist, home });
+    ensureTraecodeWorkspaceMcp(r, { dist, home, stateFile: STATE });
     const before = readFileSync(mcpFile(r), "utf8");
-    ensureTraecodeWorkspaceMcp(r, { dist, home });
+    ensureTraecodeWorkspaceMcp(r, { dist, home, stateFile: STATE });
     expect(readFileSync(mcpFile(r), "utf8")).toBe(before);
   });
 
@@ -109,7 +113,7 @@ describe("ensureTraecodeWorkspaceMcp", () => {
         },
       })
     );
-    ensureTraecodeWorkspaceMcp(r, { dist, home });
+    ensureTraecodeWorkspaceMcp(r, { dist, home, stateFile: STATE });
     const doc = readJson(r);
     expect(doc.mcpServers.other).toEqual({ command: "uvx", args: ["something"] });
     expect(doc.mcpServers.hindsight).toEqual({
@@ -128,7 +132,7 @@ describe("ensureTraecodeWorkspaceMcp", () => {
     mkdirSync(join(r, ".trae"), { recursive: true });
     const foreign = { command: "python", args: ["-m", "my_hindsight"] };
     writeFileSync(mcpFile(r), JSON.stringify({ mcpServers: { hindsight: foreign } }));
-    ensureTraecodeWorkspaceMcp(r, { dist, home });
+    ensureTraecodeWorkspaceMcp(r, { dist, home, stateFile: STATE });
     expect(readJson(r).mcpServers.hindsight).toEqual(foreign);
   });
 
@@ -136,7 +140,7 @@ describe("ensureTraecodeWorkspaceMcp", () => {
     const { repo: r, dist, home } = repo();
     mkdirSync(join(r, ".trae"), { recursive: true });
     writeFileSync(mcpFile(r), "{ not json");
-    ensureTraecodeWorkspaceMcp(r, { dist, home });
+    ensureTraecodeWorkspaceMcp(r, { dist, home, stateFile: STATE });
     expect(readFileSync(mcpFile(r), "utf8")).toBe("{ not json");
   });
 
@@ -144,7 +148,7 @@ describe("ensureTraecodeWorkspaceMcp", () => {
     it("appends the ignore line to an existing .gitignore when creating the file", () => {
       const { repo: r, dist, home } = repo();
       writeFileSync(join(r, ".gitignore"), "node_modules\n");
-      ensureTraecodeWorkspaceMcp(r, { dist, home });
+      ensureTraecodeWorkspaceMcp(r, { dist, home, stateFile: STATE });
       const gitignore = readFileSync(join(r, ".gitignore"), "utf8");
       expect(gitignore).toContain("node_modules\n");
       expect(gitignore).toContain(".trae/mcp.json");
@@ -152,23 +156,23 @@ describe("ensureTraecodeWorkspaceMcp", () => {
 
     it("creates no .gitignore when the repo has none", () => {
       const { repo: r, dist, home } = repo();
-      ensureTraecodeWorkspaceMcp(r, { dist, home });
+      ensureTraecodeWorkspaceMcp(r, { dist, home, stateFile: STATE });
       expect(existsSync(join(r, ".gitignore"))).toBe(false);
     });
 
     it("does not append when .trae is already ignored", () => {
       const { repo: r, dist, home } = repo();
       writeFileSync(join(r, ".gitignore"), "node_modules\n.trae/\n");
-      ensureTraecodeWorkspaceMcp(r, { dist, home });
+      ensureTraecodeWorkspaceMcp(r, { dist, home, stateFile: STATE });
       expect(readFileSync(join(r, ".gitignore"), "utf8")).toBe("node_modules\n.trae/\n");
     });
   });
 
   it("does nothing for home, root, or relative cwd", () => {
     const { repo: r, dist } = repo();
-    ensureTraecodeWorkspaceMcp(homedir(), { dist });
-    ensureTraecodeWorkspaceMcp("/", { dist });
-    ensureTraecodeWorkspaceMcp("relative/path", { dist });
+    ensureTraecodeWorkspaceMcp(homedir(), { dist, stateFile: STATE });
+    ensureTraecodeWorkspaceMcp("/", { dist, stateFile: STATE });
+    ensureTraecodeWorkspaceMcp("relative/path", { dist, stateFile: STATE });
     expect(existsSync(join(homedir(), ".trae", "mcp.json"))).toBe(false);
     expect(existsSync(join(r, ".trae"))).toBe(false);
   });
@@ -176,7 +180,7 @@ describe("ensureTraecodeWorkspaceMcp", () => {
   it("does nothing when the dist has no mcp-server.js (unbuilt tree)", () => {
     const { repo: r } = repo();
     const empty = tmp("traecode-mcp-empty-");
-    ensureTraecodeWorkspaceMcp(r, { dist: empty });
+    ensureTraecodeWorkspaceMcp(r, { dist: empty, stateFile: STATE });
     expect(existsSync(mcpFile(r))).toBe(false);
   });
 });

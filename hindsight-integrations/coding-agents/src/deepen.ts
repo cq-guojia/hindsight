@@ -168,6 +168,7 @@ async function main() {
       customPages: cfg.customPages,
       manage: cfg.manageBankConfig,
       extractionMode: cfg.retainExtractionMode,
+      defaults: cfg.defaultBankConfig,
     });
     if (client.knowledgePagesSupported === false) {
       diag(harness.name, "knowledge_pages_unavailable", {
@@ -208,8 +209,9 @@ async function main() {
     // ── git: seeding and syncing are the SAME code — this idempotent pass runs every session,
     // so "keep the bank current" is just "run it again". cfg.gitIngest picks the depth:
     //   none    → git contributes nothing
-    //   message → ONE aggregated commit-message doc, re-upserted when HEAD moves (same doc id, so
-    //             it replaces — the gitlog-head:<sha> tag makes freshness a single tag query)
+    //   message → ONE aggregated commit-message doc, re-upserted when HEAD moves past the commit
+    //             it was written at (same doc id, so it replaces — the gitlog-head:<sha> tag
+    //             names that commit; see gitLogIsCurrent)
     //   full    → message doc + progressive per-commit full diffs, newest first (new commits land
     //             at the top of rev-list, so the next run ingests them: that IS the sync)
     let gitFails = 0;
@@ -224,7 +226,8 @@ async function main() {
           const shas = execFileSync(
             "git",
             ["-C", REPO!, "rev-list", `-n`, String(DEEPEN_DIFF_TARGET), "HEAD"],
-            { encoding: "utf8", windowsHide: true }
+            // `install` runs this with inherited stdio: an empty repo's HEAD error must not print.
+            { encoding: "utf8", windowsHide: true, stdio: ["ignore", "pipe", "pipe"] }
           )
             .trim()
             .split("\n")

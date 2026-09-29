@@ -16,6 +16,7 @@ import { INSTALLERS, MARKER, parseJsonc, run, type InstallCtx } from "./installe
 import { TRAECODE_WORKSPACE_ENABLED_KEY } from "./core/traecode-mcp";
 import { SKILL_DIRS } from "./core/skill-dirs";
 import { parse as parseToml } from "smol-toml";
+import { HOOK_HARNESSES } from "./harness/hook-lifecycle";
 
 /** The uninstall sweep and the hook seed both shell out to the system sqlite3 — absent on some
  *  runners, so the DB-backed tests gate on a probe instead of assuming. */
@@ -225,6 +226,111 @@ describe("claude-code installer", () => {
     run(["install", "claude-code"], ctx);
     run(["uninstall", "claude-code"], ctx);
     expect(readJson(settingsPath(ctx)).hooks).toBeUndefined();
+  });
+});
+
+describe("kimi-code installer", () => {
+  // Parsed as real TOML, so a malformed block fails here rather than in the user's CLI.
+  const hookEntries = (toml: string) =>
+    (parseToml(toml).hooks as Record<string, unknown>[] | undefined) ?? [];
+
+  it("emits ONLY event/command/timeout on every entry", () => {
+    // The load-bearing invariant. Kimi validates [[hooks]] against a strict 4-key schema, and an
+    // unknown key does not drop that ENTRY — it drops EVERY hook in the file, at warning severity
+    // only. A silent total loss of capture, so assert the key set rather than the values.
+    const ctx = makeCtx();
+    expect(run(["install", "kimi-code"], ctx)).toBe(0);
+    const toml = readFileSync(join(ctx.home, ".kimi-code", "config.toml"), "utf8");
+    const ours = toml.slice(toml.indexOf("# HINDSIGHT_CODING_AGENTS_KIMI_START"));
+    const entries = hookEntries(ours);
+    expect(entries).toHaveLength(3);
+    for (const e of entries) {
+      expect(Object.keys(e).sort()).toEqual(["command", "event", "timeout"]);
+    }
+  });
+
+  it("takes its events and timeouts from the lifecycle spec, in seconds", () => {
+    // Seconds here, unlike qwen-code's identically named millisecond field. Reading them off the
+    // spec means a spec change that the runtime honours cannot silently skip the installer.
+    const ctx = makeCtx();
+    expect(run(["install", "kimi-code"], ctx)).toBe(0);
+    const toml = readFileSync(join(ctx.home, ".kimi-code", "config.toml"), "utf8");
+    const ours = toml.slice(toml.indexOf("# HINDSIGHT_CODING_AGENTS_KIMI_START"));
+    const got = hookEntries(ours).map((e) => [e.event, e.timeout]);
+    const want = Object.values(HOOK_HARNESSES["kimi-code"].install).map((h) => [
+      h.event,
+      h.timeout,
+    ]);
+    expect(got).toEqual(want);
+    expect(got.map((g) => g[1])).toEqual([30, 30, 60]);
+  });
+
+  it("preserves a user's own hooks and does not duplicate ours on re-install", () => {
+    const ctx = makeCtx();
+    const path = join(ctx.home, ".kimi-code", "config.toml");
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, '[[hooks]]\nevent = "Stop"\ncommand = "their-tool"\ntimeout = 5\n');
+    expect(run(["install", "kimi-code"], ctx)).toBe(0);
+    expect(run(["install", "kimi-code"], ctx)).toBe(0);
+    const toml = readFileSync(path, "utf8");
+    expect(toml).toContain("their-tool");
+    expect(toml.match(/HINDSIGHT_CODING_AGENTS_KIMI_START/g)).toHaveLength(1);
+    expect(toml.match(/kimi-stop-hook\.js/g)).toHaveLength(1);
+  });
+
+  it("registers a stdio MCP server that needs no bearer-token env var", () => {
+    // A hand-written http entry needs HINDSIGHT_API_KEY exported into Kimi's environment, or it
+    // 401s and the tools never appear. Ours is the packaged stdio server, which reads endpoint and
+    // token from ~/.hindsight/coding-agent.json — and it overwrites such an entry.
+    const ctx = makeCtx();
+    const mcpPath = join(ctx.home, ".kimi-code", "mcp.json");
+    mkdirSync(dirname(mcpPath), { recursive: true });
+    writeFileSync(
+      mcpPath,
+      JSON.stringify({
+        mcpServers: {
+          hindsight: { url: "http://old", bearerTokenEnvVar: "HINDSIGHT_API_KEY" },
+          theirs: { url: "http://keep-me" },
+        },
+      })
+    );
+    expect(run(["install", "kimi-code"], ctx)).toBe(0);
+    const mcp = JSON.parse(readFileSync(mcpPath, "utf8"));
+    expect(mcp.mcpServers.theirs.url).toBe("http://keep-me");
+    expect(mcp.mcpServers.hindsight.command).toBe("node");
+    expect(mcp.mcpServers.hindsight.env.HINDSIGHT_MCP_HARNESS).toBe("kimi-code");
+    expect(mcp.mcpServers.hindsight.bearerTokenEnvVar).toBeUndefined();
+    expect(mcp.mcpServers.hindsight.url).toBeUndefined();
+  });
+
+  it("honours KIMI_CODE_HOME, where the CLI and the transcript reader both look", () => {
+    const ctx = makeCtx();
+    const kimiHome = join(ctx.home, "custom-kimi");
+    const original = process.env.KIMI_CODE_HOME;
+    process.env.KIMI_CODE_HOME = kimiHome;
+    try {
+      expect(run(["install", "kimi-code"], ctx)).toBe(0);
+      expect(hookEntries(readFileSync(join(kimiHome, "config.toml"), "utf8"))).toHaveLength(3);
+      expect(existsSync(join(kimiHome, "mcp.json"))).toBe(true);
+      expect(existsSync(join(ctx.home, ".kimi-code", "config.toml"))).toBe(false);
+    } finally {
+      if (original === undefined) delete process.env.KIMI_CODE_HOME;
+      else process.env.KIMI_CODE_HOME = original;
+    }
+  });
+
+  it("uninstall removes our block, our MCP entry, and nothing else", () => {
+    const ctx = makeCtx();
+    const path = join(ctx.home, ".kimi-code", "config.toml");
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, '[[hooks]]\nevent = "Stop"\ncommand = "their-tool"\ntimeout = 5\n');
+    expect(run(["install", "kimi-code"], ctx)).toBe(0);
+    expect(run(["uninstall", "kimi-code"], ctx)).toBe(0);
+    const toml = readFileSync(path, "utf8");
+    expect(toml).toContain("their-tool");
+    expect(toml).not.toContain("HINDSIGHT_CODING_AGENTS_KIMI");
+    const mcp = JSON.parse(readFileSync(join(ctx.home, ".kimi-code", "mcp.json"), "utf8"));
+    expect(mcp.mcpServers.hindsight).toBeUndefined();
   });
 });
 
@@ -637,6 +743,35 @@ describe("traecode installer", () => {
   const mcpPath = (ctx: InstallCtx) => join(userDataRoot(ctx), "User", "mcp.json");
   const wsStorageDir = (ctx: InstallCtx, name: string) =>
     join(userDataRoot(ctx), "User", "workspaceStorage", name);
+
+  const settingsPath = (ctx: InstallCtx) => join(userDataRoot(ctx), "User", "settings.json");
+
+  it("never flips the workspace-MCP gate on a non-interactive run without the flag", () => {
+    const ctx = makeCtx();
+    const logs: string[] = [];
+    expect(run(["install", "traecode"], { ...ctx, log: (m) => logs.push(m) })).toBe(0);
+    expect(existsSync(settingsPath(ctx))).toBe(false);
+    expect(logs.join("\n")).toContain("--enable-workspace-mcp");
+  });
+
+  it("--enable-workspace-mcp turns the gate on and records it beside the runtime the hooks run from", () => {
+    const ctx = makeCtx();
+    const runtime = mkdtempSync(join(tmpdir(), "hs-traecode-runtime-"));
+    homes.push(runtime);
+    const dist = join(runtime, "dist");
+    mkdirSync(dirname(settingsPath(ctx)), { recursive: true });
+    writeFileSync(settingsPath(ctx), JSON.stringify({ "editor.fontSize": 13 }));
+
+    expect(run(["install", "traecode", "--enable-workspace-mcp"], { ...ctx, dist })).toBe(0);
+
+    expect(readJson(settingsPath(ctx))).toEqual({
+      "editor.fontSize": 13,
+      "trae.mcp.enableWorkspaceMcp": true,
+    });
+    expect(readJson(join(runtime, ".workspace-mcp.json"))).toMatchObject({
+      workspaceMcpEnabled: true,
+    });
+  });
 
   it("registers the three hooks under the hooks key of ~/.trae-cn/hooks.json, in Claude's nested shape", () => {
     // TraeCode reads the event map from the top-level `hooks` KEY (Claude Code's settings.json
@@ -1760,6 +1895,7 @@ describe("cursor-cli installer", () => {
 
 describe("grok-build installer", () => {
   const configPath = (ctx: InstallCtx) => join(ctx.home, ".grok", "config.toml");
+  const hooksPath = (ctx: InstallCtx) => join(ctx.home, ".grok", "hooks", "hindsight.json");
 
   it("re-install REPLACES the block so a moved package is repointed, not left stale", () => {
     const ctx = makeCtx();
@@ -1774,18 +1910,50 @@ describe("grok-build installer", () => {
     expect(toml).not.toContain(ctx.dist); // the old path is gone, not merely appended past
     // Exactly one block — a replace, not an accumulation.
     expect(toml.match(/HINDSIGHT_CODING_AGENTS_GROK_START/g)).toHaveLength(1);
+    const hooks = readFileSync(hooksPath(ctx), "utf8");
+    expect(hooks).toContain(join("/opt", MARKER, "moved-dist"));
+    expect(hooks).not.toContain(ctx.dist);
+    expect(readJson(hooksPath(ctx)).hooks.Stop).toHaveLength(1);
   });
 
-  it("installs native Grok lifecycle hooks and MCP without Claude configuration", () => {
+  // Grok loads `[[hooks.*]]` tables from config.toml, but its config validator flags the `hooks`
+  // key as unrecognized on every `grok inspect`. The hooks directory draws no warning.
+  it("installs lifecycle hooks in ~/.grok/hooks and MCP in config.toml", () => {
     const ctx = makeCtx();
     expect(run(["install", "grok-build"], ctx)).toBe(0);
+    expect(readJson(hooksPath(ctx)).hooks).toEqual({
+      SessionStart: [
+        {
+          hooks: [
+            {
+              type: "command",
+              command: `node "${join(ctx.dist, "grok-sessionstart-hook.js")}"`,
+              timeout: 30,
+            },
+          ],
+        },
+      ],
+      UserPromptSubmit: [
+        {
+          hooks: [
+            { type: "command", command: `node "${join(ctx.dist, "grok-hook.js")}"`, timeout: 30 },
+          ],
+        },
+      ],
+      Stop: [
+        {
+          hooks: [
+            {
+              type: "command",
+              command: `node "${join(ctx.dist, "grok-stop-hook.js")}"`,
+              timeout: 60,
+            },
+          ],
+        },
+      ],
+    });
     const config = readFileSync(configPath(ctx), "utf8");
-    expect(config).toContain("[[hooks.SessionStart]]");
-    expect(config).toContain("[[hooks.UserPromptSubmit]]");
-    expect(config).toContain("[[hooks.Stop]]");
-    expect(config).toContain(join(ctx.dist, "grok-sessionstart-hook.js"));
-    expect(config).toContain(join(ctx.dist, "grok-hook.js"));
-    expect(config).toContain(join(ctx.dist, "grok-stop-hook.js"));
+    expect(parseToml(config)).not.toHaveProperty("hooks");
     expect(config).toContain("[mcp_servers.hindsight]");
     expect(config).toContain(join(ctx.dist, "mcp-server.js"));
     expect(config).toContain('env = { HINDSIGHT_MCP_HARNESS = "grok-build" }');
@@ -1812,8 +1980,7 @@ describe("grok-build installer", () => {
     const parsed = parseToml(toml) as any;
     expect(Object.keys(parsed.mcp_servers)).toEqual(["hindsight"]);
     expect(toml.match(/\[mcp_servers\.hindsight\]/g)).toHaveLength(1);
-    expect(toml.match(/\[\[hooks\.SessionStart\]\]/g)).toHaveLength(1);
-    expect(toml.match(/\[\[hooks\.UserPromptSubmit\]\]/g)).toHaveLength(1);
+    expect(parsed).not.toHaveProperty("hooks");
     expect(toml).not.toContain(join("/opt", MARKER, "old-dist"));
     expect(toml).toContain(join(ctx.dist, "mcp-server.js"));
     expect(toml).toContain('[ui]\ntheme = "dark"'); // foreign config preserved
@@ -1873,6 +2040,73 @@ describe("grok-build installer", () => {
     expect(toml).not.toContain("[mcp_servers.hindsight]");
     expect(toml).not.toContain("grok-sessionstart-hook.js");
     expect(toml).toContain('[ui]\ntheme = "dark"');
+  });
+
+  it("moves the hooks a previous release kept in its marked block", () => {
+    const ctx = makeCtx();
+    mkdirSync(dirname(configPath(ctx)), { recursive: true });
+    const old = join("/opt", MARKER, "old-dist");
+    writeFileSync(
+      configPath(ctx),
+      '[ui]\ntheme = "dark"\n\n# HINDSIGHT_CODING_AGENTS_GROK_START\n' +
+        `${legacyToml(old).slice('[ui]\ntheme = "dark"\n\n'.length)}` +
+        `env = { HINDSIGHT_MCP_HARNESS = "grok-build" }\n# HINDSIGHT_CODING_AGENTS_GROK_END\n`
+    );
+    expect(run(["install", "grok-build"], ctx)).toBe(0);
+
+    const parsed = parseToml(readFileSync(configPath(ctx), "utf8")) as any;
+    expect(parsed).not.toHaveProperty("hooks");
+    expect(parsed.ui).toEqual({ theme: "dark" });
+    expect(parsed.mcp_servers.hindsight.args).toEqual([join(ctx.dist, "mcp-server.js")]);
+    expect(Object.keys(readJson(hooksPath(ctx)).hooks)).toEqual([
+      "SessionStart",
+      "UserPromptSubmit",
+      "Stop",
+    ]);
+  });
+
+  it("uninstall keeps other hooks in the Grok hooks file", () => {
+    const ctx = makeCtx();
+    mkdirSync(dirname(hooksPath(ctx)), { recursive: true });
+    const mine = { hooks: [{ type: "command", command: "my-own-script" }] };
+    writeFileSync(hooksPath(ctx), JSON.stringify({ hooks: { Stop: [mine] } }));
+    run(["install", "grok-build"], ctx);
+    expect(readJson(hooksPath(ctx)).hooks.Stop).toHaveLength(2);
+
+    run(["uninstall", "grok-build"], ctx);
+    expect(readJson(hooksPath(ctx))).toEqual({ hooks: { Stop: [mine] } });
+  });
+
+  // readJson returns {} for any top-level value that is not a plain object, so a hand-mangled
+  // file is replaced rather than merged into and written back out as an array.
+  it("replaces a Grok hooks file that is not a JSON object", () => {
+    const ctx = makeCtx();
+    mkdirSync(dirname(hooksPath(ctx)), { recursive: true });
+    writeFileSync(hooksPath(ctx), '["junk"]');
+    expect(run(["install", "grok-build"], ctx)).toBe(0);
+    const file = readJson(hooksPath(ctx));
+    // Spreading the array in would have left a stray "0": "junk" beside the hooks.
+    expect(Object.keys(file)).toEqual(["hooks"]);
+    expect(Object.keys(file.hooks)).toEqual(
+      expect.arrayContaining(["SessionStart", "UserPromptSubmit", "Stop"])
+    );
+  });
+
+  it("replaces a Grok hooks file whose hooks are not an object", () => {
+    const ctx = makeCtx();
+    mkdirSync(dirname(hooksPath(ctx)), { recursive: true });
+    writeFileSync(hooksPath(ctx), JSON.stringify({ hooks: [] }));
+    expect(run(["install", "grok-build"], ctx)).toBe(0);
+    expect(Object.keys(readJson(hooksPath(ctx)).hooks)).toEqual(
+      expect.arrayContaining(["SessionStart", "UserPromptSubmit", "Stop"])
+    );
+  });
+
+  it("uninstall deletes a Grok hooks file left empty", () => {
+    const ctx = makeCtx();
+    run(["install", "grok-build"], ctx);
+    run(["uninstall", "grok-build"], ctx);
+    expect(existsSync(hooksPath(ctx))).toBe(false);
   });
 
   it("removes only its marked Grok TOML block", () => {
@@ -2080,6 +2314,7 @@ describe("run() CLI behavior", () => {
       "copilot-cli",
       "grok-build",
       "qwen-code",
+      "kimi-code",
       "cline-cli",
       "dcode",
       "dsh",

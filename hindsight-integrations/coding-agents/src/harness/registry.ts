@@ -72,6 +72,7 @@ export const HARNESS_NAMES = [
   "zcode",
   // TraeCode is a per-prompt HOOK host registered in ~/.trae-cn/hooks.json (see src/installer.ts).
   "traecode",
+  "kimi-code",
 ];
 
 const HOOK_BINS: Record<string, string> = {
@@ -87,6 +88,7 @@ const HOOK_BINS: Record<string, string> = {
   "factory-droid": "hindsight-droid-hook",
   zcode: "hindsight-zcode-hook",
   traecode: "hindsight-traecode-hook",
+  "kimi-code": "hindsight-kimi-hook",
   // more hook harnesses: add a HookSpec entry point (see src/cursor-hook.ts) + a registration here.
 };
 
