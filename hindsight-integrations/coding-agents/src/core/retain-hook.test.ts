@@ -187,12 +187,7 @@ describe("buildRetain", () => {
       sessionId: "same-session",
       readTranscript: readCodexTranscript,
       cursors,
-      client: {
-        retain,
-        bank: "test-bank",
-        supportsIdempotentRetain: async () => true,
-        supportsAppendRetain: async () => true,
-      },
+      client: { retain, bank: "test-bank", supportsAppendRetain: async () => true },
     };
     const fileB = join(root, "rollout-b.jsonl");
     writeFileSync(file, segment("The Atlas connector is amber.", "Noted."));
@@ -241,12 +236,7 @@ describe("buildRetain", () => {
       sessionId: "late-hook-session",
       readTranscript: readCodexTranscript,
       cursors: memoryCursorStore(),
-      client: {
-        retain,
-        bank: "test-bank",
-        supportsIdempotentRetain: async () => true,
-        supportsAppendRetain: async () => true,
-      },
+      client: { retain, bank: "test-bank", supportsAppendRetain: async () => true },
     };
     const fileB = join(root, "rollout-late-b.jsonl");
     writeFileSync(file, segment("The Atlas connector is amber.", "Noted."));
