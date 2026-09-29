@@ -1362,9 +1362,12 @@ class ReflectDefaultOptions(BaseModel):
 
     Every field is ``None`` = "not set", so the same model is both the shape of
     the ``reflect_default_options`` bank config key and the set of fields a
-    reflect request (or a mental model's trigger) inherits from it. The
-    resolution chain is: explicit request/trigger value -> bank
-    ``reflect_default_options`` -> the shipped default.
+    reflect request inherits from it. The resolution chain is: explicit request
+    value -> bank ``reflect_default_options`` -> the shipped default.
+
+    A mental-model refresh does NOT read this. It is its own operation with its
+    own per-bank default (``knowledge_page_default_trigger``), so the same-named
+    fields are declared on ``MentalModelTrigger`` instead — see there.
     """
 
     reflect_search_observations_max_tokens: int | None = Field(
@@ -3081,13 +3084,27 @@ class UpdateDirectiveRequest(BaseModel):
 # =========================================================================
 
 
-class MentalModelTrigger(ReflectDefaultOptions):
+class MentalModelTrigger(BaseModel):
     """Trigger settings for a mental model.
 
-    Inherits the reflect options an operator can also default per bank
-    (``reflect_default_options``): set here they apply to this model's refreshes
-    only, and win over the bank default.
+    A refresh is not an ad-hoc reflect with different arguments: it synthesizes a
+    whole document, so it wants its own retrieval and iteration settings. This
+    trigger is therefore the only source for them — a bank's
+    ``reflect_default_options`` deliberately does not reach a refresh. The
+    per-bank default for these fields is ``knowledge_page_default_trigger``,
+    which is merged over this same shape when a page is created.
     """
+
+    budget: Budget | None = Field(
+        default=None,
+        description=(
+            "How many agent iterations a refresh may spend, as a multiple of "
+            "reflect_max_iterations: 'low' halves it, 'mid' keeps it, 'high' doubles it. "
+            "A refresh is the heaviest reflect there is — it writes a whole document, and with "
+            "exclude_mental_models it must read raw facts first — so null means 'mid', not the "
+            "'low' an ad-hoc reflect defaults to."
+        ),
+    )
 
     mode: Literal["full", "delta"] = Field(
         default="full",
@@ -3149,7 +3166,9 @@ class MentalModelTrigger(ReflectDefaultOptions):
             "one of the model's tags and untagged memories are excluded, which is why a model "
             "tagged with labels its memories do not carry refreshes to empty content. "
             "Set to 'all' to keep requiring the tags while including untagged memories, or to "
-            "'any' to include untagged memories alongside any single tag match."
+            "'any' to include untagged memories alongside any single tag match. "
+            "Staleness ignores that widening: an untagged write never marks a tagged model stale, "
+            "in any mode — only a write that matches the model's tags does."
         ),
     )
     tag_groups: list[TagGroup] | None = Field(
@@ -3179,6 +3198,23 @@ class MentalModelTrigger(ReflectDefaultOptions):
         description=(
             "Override the token budget for raw chunks returned by the internal recall during refresh. "
             "None means use the bank/global config default (recall_chunks_max_tokens)."
+        ),
+    )
+    reflect_search_observations_max_tokens: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Override the token budget for the refresh's search_observations calls. Observation "
+            "evidence is often the largest contributor to the reflect context; lowering it trades "
+            "the lowest-ranked observations for a smaller LLM context. null means the shipped 5000."
+        ),
+    )
+    reflect_search_observations_include_entities: bool | None = Field(
+        default=None,
+        description=(
+            "Override whether search_observations attaches resolved entity names to each "
+            "observation. Entities can be more than half the serialized tool payload; turning them "
+            "off keeps the same observations and ranking with a much smaller context. null means enabled."
         ),
     )
     response_schema: dict | None = Field(
@@ -4350,6 +4386,10 @@ class OperationResponse(BaseModel):
 
     id: str
     task_type: str
+    operation_id: str | None = Field(default=None, description="Same as `id`; the name the single-operation read uses.")
+    operation_type: str | None = Field(
+        default=None, description="Same as `task_type`; the name the single-operation read uses."
+    )
     items_count: int
     document_id: str | None = None
     filename: str | None = Field(
@@ -4361,8 +4401,7 @@ class OperationResponse(BaseModel):
         description=(
             "Mental model this operation acted on (refresh_mental_model); null for other task types. "
             "Without it the list cannot say which model an operation refreshed — `document_id` is null "
-            "for these, and the list carries no result_metadata. The single-operation read exposes the "
-            "same value under `result_metadata`."
+            "for these, and the list carries no result_metadata."
         ),
     )
     details: RefreshMentalModelOperationDetails | None = Field(
@@ -4540,6 +4579,14 @@ class OperationStatusResponse(BaseModel):
     operation_id: str
     status: Literal["pending", "processing", "completed", "failed", "cancelled", "not_found"]
     operation_type: str | None = None
+    id: str | None = Field(default=None, description="Same as `operation_id`; the name the operations list uses.")
+    task_type: str | None = Field(
+        default=None, description="Same as `operation_type`; the name the operations list uses."
+    )
+    mental_model_id: str | None = Field(
+        default=None,
+        description="Mental model this operation acted on (refresh_mental_model); null for other task types.",
+    )
     created_at: str | None = None
     updated_at: str | None = None
     completed_at: str | None = None

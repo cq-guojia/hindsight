@@ -4714,23 +4714,18 @@ export type MentalModelTraceToolCall = {
  *
  * Trigger settings for a mental model.
  *
- * Inherits the reflect options an operator can also default per bank
- * (``reflect_default_options``): set here they apply to this model's refreshes
- * only, and win over the bank default.
+ * A refresh is not an ad-hoc reflect with different arguments: it synthesizes a
+ * whole document, so it wants its own retrieval and iteration settings. This
+ * trigger is therefore the only source for them — a bank's
+ * ``reflect_default_options`` deliberately does not reach a refresh. The
+ * per-bank default for these fields is ``knowledge_page_default_trigger``,
+ * which is merged over this same shape when a page is created.
  */
 export type MentalModelTriggerInput = {
   /**
-   * Reflect Search Observations Max Tokens
-   *
-   * Token budget for reflect's search_observations tool when the model names none. Observation evidence is often the largest contributor to the reflect context; lowering it trades the lowest-ranked observations for a smaller LLM context. None means use the shipped default (5000).
+   * How many agent iterations a refresh may spend, as a multiple of reflect_max_iterations: 'low' halves it, 'mid' keeps it, 'high' doubles it. A refresh is the heaviest reflect there is — it writes a whole document, and with exclude_mental_models it must read raw facts first — so null means 'mid', not the 'low' an ad-hoc reflect defaults to.
    */
-  reflect_search_observations_max_tokens?: number | null;
-  /**
-   * Reflect Search Observations Include Entities
-   *
-   * Whether search_observations attaches resolved entity names to each observation. Entities can be more than half the serialized tool payload; turning them off keeps the same observations and ranking with a much smaller context. None means enabled.
-   */
-  reflect_search_observations_include_entities?: boolean | null;
+  budget?: Budget | null;
   /**
    * Mode
    *
@@ -4776,7 +4771,7 @@ export type MentalModelTriggerInput = {
   /**
    * Tags Match
    *
-   * Override how the model's tags filter memories during refresh. If not set, defaults to 'all_strict' when the model has tags (security isolation) or 'any' when the model has no tags. Under 'all_strict' a memory must carry EVERY one of the model's tags and untagged memories are excluded, which is why a model tagged with labels its memories do not carry refreshes to empty content. Set to 'all' to keep requiring the tags while including untagged memories, or to 'any' to include untagged memories alongside any single tag match.
+   * Override how the model's tags filter memories during refresh. If not set, defaults to 'all_strict' when the model has tags (security isolation) or 'any' when the model has no tags. Under 'all_strict' a memory must carry EVERY one of the model's tags and untagged memories are excluded, which is why a model tagged with labels its memories do not carry refreshes to empty content. Set to 'all' to keep requiring the tags while including untagged memories, or to 'any' to include untagged memories alongside any single tag match. Staleness ignores that widening: an untagged write never marks a tagged model stale, in any mode — only a write that matches the model's tags does.
    */
   tags_match?: "any" | "all" | "any_strict" | "all_strict" | "exact" | null;
   /**
@@ -4804,6 +4799,18 @@ export type MentalModelTriggerInput = {
    */
   recall_chunks_max_tokens?: number | null;
   /**
+   * Reflect Search Observations Max Tokens
+   *
+   * Override the token budget for the refresh's search_observations calls. Observation evidence is often the largest contributor to the reflect context; lowering it trades the lowest-ranked observations for a smaller LLM context. null means the shipped 5000.
+   */
+  reflect_search_observations_max_tokens?: number | null;
+  /**
+   * Reflect Search Observations Include Entities
+   *
+   * Override whether search_observations attaches resolved entity names to each observation. Entities can be more than half the serialized tool payload; turning them off keeps the same observations and ranking with a much smaller context. null means enabled.
+   */
+  reflect_search_observations_include_entities?: boolean | null;
+  /**
    * Response Schema
    *
    * Optional JSON Schema for structured output. When set, each refresh runs the same structured-output extraction as reflect's response_schema and stores the parsed result under reflect_response.structured_output alongside the markdown content.
@@ -4824,23 +4831,18 @@ export type MentalModelTriggerInput = {
  *
  * Trigger settings for a mental model.
  *
- * Inherits the reflect options an operator can also default per bank
- * (``reflect_default_options``): set here they apply to this model's refreshes
- * only, and win over the bank default.
+ * A refresh is not an ad-hoc reflect with different arguments: it synthesizes a
+ * whole document, so it wants its own retrieval and iteration settings. This
+ * trigger is therefore the only source for them — a bank's
+ * ``reflect_default_options`` deliberately does not reach a refresh. The
+ * per-bank default for these fields is ``knowledge_page_default_trigger``,
+ * which is merged over this same shape when a page is created.
  */
 export type MentalModelTriggerOutput = {
   /**
-   * Reflect Search Observations Max Tokens
-   *
-   * Token budget for reflect's search_observations tool when the model names none. Observation evidence is often the largest contributor to the reflect context; lowering it trades the lowest-ranked observations for a smaller LLM context. None means use the shipped default (5000).
+   * How many agent iterations a refresh may spend, as a multiple of reflect_max_iterations: 'low' halves it, 'mid' keeps it, 'high' doubles it. A refresh is the heaviest reflect there is — it writes a whole document, and with exclude_mental_models it must read raw facts first — so null means 'mid', not the 'low' an ad-hoc reflect defaults to.
    */
-  reflect_search_observations_max_tokens?: number | null;
-  /**
-   * Reflect Search Observations Include Entities
-   *
-   * Whether search_observations attaches resolved entity names to each observation. Entities can be more than half the serialized tool payload; turning them off keeps the same observations and ranking with a much smaller context. None means enabled.
-   */
-  reflect_search_observations_include_entities?: boolean | null;
+  budget?: Budget | null;
   /**
    * Mode
    *
@@ -4886,7 +4888,7 @@ export type MentalModelTriggerOutput = {
   /**
    * Tags Match
    *
-   * Override how the model's tags filter memories during refresh. If not set, defaults to 'all_strict' when the model has tags (security isolation) or 'any' when the model has no tags. Under 'all_strict' a memory must carry EVERY one of the model's tags and untagged memories are excluded, which is why a model tagged with labels its memories do not carry refreshes to empty content. Set to 'all' to keep requiring the tags while including untagged memories, or to 'any' to include untagged memories alongside any single tag match.
+   * Override how the model's tags filter memories during refresh. If not set, defaults to 'all_strict' when the model has tags (security isolation) or 'any' when the model has no tags. Under 'all_strict' a memory must carry EVERY one of the model's tags and untagged memories are excluded, which is why a model tagged with labels its memories do not carry refreshes to empty content. Set to 'all' to keep requiring the tags while including untagged memories, or to 'any' to include untagged memories alongside any single tag match. Staleness ignores that widening: an untagged write never marks a tagged model stale, in any mode — only a write that matches the model's tags does.
    */
   tags_match?: "any" | "all" | "any_strict" | "all_strict" | "exact" | null;
   /**
@@ -4915,6 +4917,18 @@ export type MentalModelTriggerOutput = {
    * Override the token budget for raw chunks returned by the internal recall during refresh. None means use the bank/global config default (recall_chunks_max_tokens).
    */
   recall_chunks_max_tokens?: number | null;
+  /**
+   * Reflect Search Observations Max Tokens
+   *
+   * Override the token budget for the refresh's search_observations calls. Observation evidence is often the largest contributor to the reflect context; lowering it trades the lowest-ranked observations for a smaller LLM context. null means the shipped 5000.
+   */
+  reflect_search_observations_max_tokens?: number | null;
+  /**
+   * Reflect Search Observations Include Entities
+   *
+   * Override whether search_observations attaches resolved entity names to each observation. Entities can be more than half the serialized tool payload; turning them off keeps the same observations and ranking with a much smaller context. null means enabled.
+   */
+  reflect_search_observations_include_entities?: boolean | null;
   /**
    * Response Schema
    *
@@ -5101,6 +5115,18 @@ export type OperationResponse = {
    */
   task_type: string;
   /**
+   * Operation Id
+   *
+   * Same as `id`; the name the single-operation read uses.
+   */
+  operation_id?: string | null;
+  /**
+   * Operation Type
+   *
+   * Same as `task_type`; the name the single-operation read uses.
+   */
+  operation_type?: string | null;
+  /**
    * Items Count
    */
   items_count: number;
@@ -5117,7 +5143,7 @@ export type OperationResponse = {
   /**
    * Mental Model Id
    *
-   * Mental model this operation acted on (refresh_mental_model); null for other task types. Without it the list cannot say which model an operation refreshed — `document_id` is null for these, and the list carries no result_metadata. The single-operation read exposes the same value under `result_metadata`.
+   * Mental model this operation acted on (refresh_mental_model); null for other task types. Without it the list cannot say which model an operation refreshed — `document_id` is null for these, and the list carries no result_metadata.
    */
   mental_model_id?: string | null;
   /**
@@ -5178,6 +5204,24 @@ export type OperationStatusResponse = {
    * Operation Type
    */
   operation_type?: string | null;
+  /**
+   * Id
+   *
+   * Same as `operation_id`; the name the operations list uses.
+   */
+  id?: string | null;
+  /**
+   * Task Type
+   *
+   * Same as `operation_type`; the name the operations list uses.
+   */
+  task_type?: string | null;
+  /**
+   * Mental Model Id
+   *
+   * Mental model this operation acted on (refresh_mental_model); null for other task types.
+   */
+  mental_model_id?: string | null;
   /**
    * Created At
    */
