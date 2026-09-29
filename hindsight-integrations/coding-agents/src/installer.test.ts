@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { INSTALLERS, MARKER, parseJsonc, run, type InstallCtx } from "./installer";
-import { traecodeWorkspaceEnabledKey } from "./core/traecode-mcp";
+import { TRAECODE_WORKSPACE_ENABLED_KEY } from "./core/traecode-mcp";
 import { SKILL_DIRS } from "./core/skill-dirs";
 import { parse as parseToml } from "smol-toml";
 
@@ -929,7 +929,7 @@ describe("traecode installer", () => {
         execFileSync("sqlite3", [db, `SELECT value FROM ItemTable WHERE key='${key}';`], {
           encoding: "utf8",
         }).trim();
-      expect(value(traecodeWorkspaceEnabledKey())).toBe("true");
+      expect(value(TRAECODE_WORKSPACE_ENABLED_KEY)).toBe("true");
       expect(value("some.other.key")).toBe("1");
     }
   );
@@ -982,7 +982,7 @@ describe("traecode installer", () => {
       execFileSync("sqlite3", [
         db,
         "CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB);",
-        `INSERT OR REPLACE INTO ItemTable (key, value) VALUES ('${traecodeWorkspaceEnabledKey()}', 'true');`,
+        `INSERT OR REPLACE INTO ItemTable (key, value) VALUES ('${TRAECODE_WORKSPACE_ENABLED_KEY}', 'true');`,
         "INSERT OR REPLACE INTO ItemTable (key, value) VALUES ('some.other.key', '1');",
       ]);
       expect(run(["install", "traecode"], ctx)).toBe(0);
@@ -991,7 +991,7 @@ describe("traecode installer", () => {
         execFileSync("sqlite3", [db, `SELECT value FROM ItemTable WHERE key='${key}';`], {
           encoding: "utf8",
         }).trim();
-      expect(query(traecodeWorkspaceEnabledKey())).toBe("");
+      expect(query(TRAECODE_WORKSPACE_ENABLED_KEY)).toBe("");
       expect(query("some.other.key")).toBe("1");
     }
   );

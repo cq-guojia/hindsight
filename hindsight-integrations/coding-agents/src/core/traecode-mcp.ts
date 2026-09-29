@@ -37,6 +37,7 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { diag } from "./diag";
+import { isOurMcpEntry } from "./util";
 
 const MCP_SERVER_NAME = "hindsight";
 const MCP_FILE_REL = join(".trae", "mcp.json");
@@ -46,23 +47,6 @@ const MCP_FILE_REL = join(".trae", "mcp.json");
 function bundledDistDir(): string {
   const here = dirname(fileURLToPath(import.meta.url));
   return existsSync(join(here, "mcp-server.js")) ? here : join(here, "..", "..", "dist");
-}
-
-/** Same shape check the installer applies to user-level registrations (isOurMcpEntry there):
- *  name ownership alone would let this hook hijack a user's own `hindsight` server. Duplicated
- *  rather than imported — installer.ts drags the whole install surface into the hook bundle. */
-function isOurMcpEntry(entry: unknown): boolean {
-  if (!entry || typeof entry !== "object") return false;
-  const candidate = entry as { command?: unknown; args?: unknown };
-  if (candidate.command !== "node" || !Array.isArray(candidate.args)) return false;
-  const script = candidate.args[0];
-  if (typeof script !== "string") return false;
-  const parts = script.replaceAll("\\", "/").split("/").filter(Boolean);
-  return (
-    parts.at(-1) === "mcp-server.js" &&
-    parts.at(-2) === "dist" &&
-    (parts.at(-3) === "coding-agents" || parts.at(-3) === "hindsight-coding-agents")
-  );
 }
 
 /** Key-order-insensitive JSON comparison: a spread-built entry may equal the existing one while
@@ -362,9 +346,44 @@ const WORKSPACE_STORAGE_REL = join("User", "workspaceStorage");
 const ENABLED_KEY_PREFIX = "icubeAgentExtension.enabled.mcp.config.ws0.";
 const SQLITE_TIMEOUT_MS = 5_000;
 
-/** The ItemTable key Trae persists for this server's per-workspace switch. Exported for the
- *  installer's uninstall sweep, which removes the keys the hook seeded. */
-export const traecodeWorkspaceEnabledKey = (): string => ENABLED_KEY_PREFIX + MCP_SERVER_NAME;
+/** The ItemTable key Trae persists for this server's per-workspace switch. */
+export const TRAECODE_WORKSPACE_ENABLED_KEY = ENABLED_KEY_PREFIX + MCP_SERVER_NAME;
+
+export const traecodeWorkspaceStorageDir = (home: string): string =>
+  join(traecodeUserDataDir(home), WORKSPACE_STORAGE_REL);
+
+/** Uninstall counterpart of the seed: drop our switch from every window's storage DB. The key
+ *  is ours by name. Best-effort: a locked or absent DB is skipped. Never throws. */
+export function removeWorkspaceMcpEnabledKeys(home: string): void {
+  const storage = traecodeWorkspaceStorageDir(home);
+  let entries: string[];
+  try {
+    entries = readdirSync(storage);
+  } catch {
+    return; // no storage dir at all
+  }
+  for (const name of entries) {
+    const db = join(storage, name, "state.vscdb");
+    if (!existsSync(db)) continue; // sqlite3 would create an empty DB on open — don't
+    try {
+      execFileSync(
+        "sqlite3",
+        [
+          db,
+          ".timeout 3000",
+          `DELETE FROM ItemTable WHERE key='${TRAECODE_WORKSPACE_ENABLED_KEY}';`,
+        ],
+        {
+          timeout: SQLITE_TIMEOUT_MS,
+          windowsHide: true,
+          stdio: ["ignore", "pipe", "pipe"],
+        }
+      );
+    } catch {
+      /* locked DB for one workspace: leave it */
+    }
+  }
+}
 
 /** The storage dir whose workspace.json points at `repo`, or undefined. Non-folder entries
  *  (multi-root `.code-workspace` windows, half-written dirs) are skipped: for those the switch
@@ -407,10 +426,7 @@ export function ensureWorkspaceMcpEnabled(
     const home = opts.home ?? homedir();
     // Same guard as the registration: home/root/relative cwds are not Trae workspaces.
     if (!cwd || !isAbsolute(cwd) || dirname(cwd) === cwd || cwd === home) return "failed";
-    const dir = findWorkspaceStorageDir(
-      join(traecodeUserDataDir(home), WORKSPACE_STORAGE_REL),
-      cwd
-    );
+    const dir = findWorkspaceStorageDir(traecodeWorkspaceStorageDir(home), cwd);
     if (!dir) return "failed";
     const db = join(dir, "state.vscdb");
     if (!existsSync(db)) return "failed";
@@ -423,12 +439,12 @@ export function ensureWorkspaceMcpEnabled(
         stdio: ["ignore", "pipe", "pipe"],
       } as const).trim();
     if (
-      run(`SELECT value FROM ItemTable WHERE key='${traecodeWorkspaceEnabledKey()}';`) === "true"
+      run(`SELECT value FROM ItemTable WHERE key='${TRAECODE_WORKSPACE_ENABLED_KEY}';`) === "true"
     ) {
       return "on";
     }
     run(
-      `INSERT OR REPLACE INTO ItemTable (key, value) VALUES ('${traecodeWorkspaceEnabledKey()}', 'true');`
+      `INSERT OR REPLACE INTO ItemTable (key, value) VALUES ('${TRAECODE_WORKSPACE_ENABLED_KEY}', 'true');`
     );
     diag("traecode", "workspace_mcp_enabled_seeded", { cwd, db });
     return "seeded";

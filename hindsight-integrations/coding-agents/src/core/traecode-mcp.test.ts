@@ -10,7 +10,7 @@ import {
   ensureWorkspaceMcpEnabled,
   markWorkspaceMcpEnabled,
   traecodeUserSettingsPath,
-  traecodeWorkspaceEnabledKey,
+  TRAECODE_WORKSPACE_ENABLED_KEY,
   workspaceEnableHint,
   workspaceMcpGateState,
   workspaceMcpHint,
@@ -341,7 +341,7 @@ describe("workspace enable switch seed", () => {
     const repo = tmp("repo-");
     const { home, db } = homeWithWorkspace(repo, [["some.other.key", "1"]]);
     expect(ensureWorkspaceMcpEnabled(repo, { home })).toBe("seeded");
-    expect(query(db, traecodeWorkspaceEnabledKey())).toBe("true");
+    expect(query(db, TRAECODE_WORKSPACE_ENABLED_KEY)).toBe("true");
     expect(query(db, "some.other.key")).toBe("1"); // the rest of the table is untouched
     expect(ensureWorkspaceMcpEnabled(repo, { home })).toBe("on"); // idempotent skip
   });
