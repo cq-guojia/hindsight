@@ -11,10 +11,11 @@ name: Security Scan
 #   scan-next-build — would an image built from main today be clean? (one build
 #                     per runtime base; catches a regression before it reaches
 #                     a release tag)
+# NOTE: the `schedule` trigger is intentionally disabled on this fork. These
+# scans target ghcr.io/<owner>/... images, and this fork publishes no images, so
+# the daily run fails and spams failure emails. Re-enable (and publish images /
+# mirror upstream's) only if you actually want scheduled scanning here.
 on:
-  schedule:
-    # 05:30 UTC daily, after Debian's usual security-update publication window.
-    - cron: '30 5 * * *'
   workflow_dispatch:
 
 permissions:

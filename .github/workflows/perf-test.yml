@@ -1,9 +1,11 @@
 name: Performance Tests
 
+# NOTE: the `schedule` trigger is intentionally disabled on this fork. The perf
+# jobs need secrets (GEMINI_API_KEY, GCP_VERTEXAI_CREDENTIALS,
+# PERF_DASHBOARD_TOKEN) this fork does not have, so the daily run fails and spams
+# failure emails. Re-enable (and add the secrets) only if you want scheduled
+# perf runs here.
 on:
-  schedule:
-    # Run daily at 06:00 UTC
-    - cron: "0 6 * * *"
   workflow_dispatch:
     inputs:
       scale:
