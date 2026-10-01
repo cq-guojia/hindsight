@@ -83,6 +83,8 @@ class InMemoryMemories(MemoriesExtension):
         # The unresolved entity names a retain session handed over per unit — what a store that
         # owns its entity registry resolves itself.
         self.retained_entity_names: dict[str, list[str]] = {}
+        # Every part a retain session was handed, in order — what a test asserts the session carried.
+        self.session_parts: list = []
         self.embeddings: dict[str, object] = {}
         # What `apply_edit` was handed, so a test can tell which door the vector came through and
         # whether the caller supplied the pre-edit fact type.
@@ -134,7 +136,7 @@ class InMemoryMemories(MemoriesExtension):
     async def count_documents(self, *, bank_id):
         return len(self.documents)
 
-    async def get_entity_graph(self, *, bank_id, limit=1000, min_count=1):
+    async def get_entity_graph(self, *, bank_id, limit=1000, min_count=1, tags=None, tags_match="any", tag_groups=None):
         return {"nodes": [], "edges": []}
 
     async def list_documents(
@@ -380,7 +382,9 @@ class InMemoryMemories(MemoriesExtension):
     async def find_failed_consolidation(self, *, conn, fq_table, bank_id):
         return [r for r in self.rows.values() if r.unit_id in self.failed and r.fact_type in ("experience", "world")]
 
-    async def entity_memory_counts(self, *, conn, fq_table, bank_id, entity_ids=None):
+    async def entity_memory_counts(
+        self, *, conn, fq_table, bank_id, entity_ids=None, tags=None, tags_match="any", tag_groups=None
+    ):
         counts: dict[str, int] = {}
         for row in self.rows.values():
             for entity_id in row.entity_ids:
@@ -518,7 +522,9 @@ class InMemoryMemories(MemoriesExtension):
         self.calls.append("set_memory_embedding")
         self.embeddings[str(unit_id)] = embedding
 
-    async def list_entities(self, *, conn, fq_table, bank_id, search=None, limit=100, offset=0):
+    async def list_entities(
+        self, *, conn, fq_table, bank_id, search=None, tags=None, tags_match="any", tag_groups=None, limit=100, offset=0
+    ):
         self.calls.append("list_entities")
         return {"items": [], "total": 0, "limit": limit, "offset": offset}
 
@@ -862,6 +868,7 @@ class _InMemoryRetainSession(RetainSession):
     async def add(self, part) -> None:
         self._store.calls.append("session.add")
         self._parts.append(part)
+        self._store.session_parts.append(part)
 
     async def commit(self) -> RetainResult:
         self._store.calls.append("session.commit")
@@ -2204,6 +2211,53 @@ async def test_import_writes_a_document_to_the_store_and_nothing_to_postgres(res
     assert sorted(store.retained_entity_names.get(cause, [])) == ["Ada", "Bob"]
     assert not store.retained_entity_names.get(effect)
     assert store.documents["doc-1"]["created_at"] == created
+    # The chunks travel in the session with the facts, as on retain — a store that writes facts
+    # only alongside their document's chunks would otherwise drop the whole import.
+    assert [p.chunk_texts for p in store.session_parts if p.chunk_texts] == [[text]]
+
+
+async def test_a_store_gets_the_same_entity_names_the_sql_resolver_would_keep(restore_default_store):
+    """The SQL resolver drops a blank or oversized name and collapses whitespace before it writes
+    (#3275); a store that resolves names itself was handed the raw extraction, so an encoded blob
+    became a registry entity there."""
+    from hindsight_api.engine.transfer.importer import _import_one_document
+    from hindsight_api.engine.transfer.schema import TransferChunk, TransferDocument, TransferFact
+
+    store = InMemoryMemories({})
+    set_memories(store)
+    text = "Acme signed the contract."
+    document = TransferDocument(
+        id="doc-1",
+        original_text=text,
+        chunks=[TransferChunk(chunk_index=0, chunk_text=text)],
+        facts=[
+            TransferFact(
+                text="Acme signed", fact_type="world", entities=["Acme", "Acme\n", "x" * 600, "  "], chunk_index=0
+            )
+        ],
+    )
+
+    class _Embedder:
+        async def embed_documents_async(self, texts):
+            return [[0.1, 0.2] for _ in texts]
+
+    class _Config:
+        store_document_text = True
+
+    batch = await _import_one_document(
+        backend=None,
+        embeddings_model=_Embedder(),
+        entity_resolver=None,
+        config=_Config(),
+        format_date_fn=str,
+        bank_id="bank-x",
+        document=document,
+        target_id="doc-1",
+        ops=None,
+    )
+
+    [unit] = batch.unit_ids
+    assert store.retained_entity_names[unit] == ["Acme"]
 
 
 async def test_backlog_gauges_count_a_store_owned_banks_memories(restore_default_store):
