@@ -14,7 +14,8 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, cast
 
-from ..search.tags import TagGroup, TagsMatch
+from ..prompt_utils import truncate_context_for_prompt
+from ..search.tags import TagGroup, TagsMatch, tags_satisfy_groups
 from ..source_scope import ids_passing, tag_filter_is_active, visible_document_ids
 from .tokenization import count_prompt_tokens
 
@@ -69,13 +70,15 @@ _UNREAD_RESULT_FIELDS = ("scores", "chunk_id", "document_id")
 
 
 def _drop_unread_fields(d: dict[str, Any]) -> dict[str, Any]:
-    """Strip retrieval plumbing from one serialized tool result.
+    """Strip retrieval plumbing from one serialized tool result and cap its ``context``.
 
     Mutates and returns ``d``, which is always a fresh ``model_dump()`` by the
     time it gets here -- never a caller's dict.
     """
     for k in _UNREAD_RESULT_FIELDS:
         d.pop(k, None)
+    if "context" in d:
+        d["context"] = truncate_context_for_prompt(d["context"])
     return d
 
 
@@ -309,6 +312,7 @@ async def tool_read_mental_models(
     bank_id: str,
     mental_model_ids: list[str],
     max_tokens: int = 6000,
+    tag_scope: list[TagGroup] | None = None,
 ) -> dict[str, Any]:
     """Read the full text of mental models the search returned as snippets.
 
@@ -317,6 +321,9 @@ async def tool_read_mental_models(
     the failure ``search_mental_models`` used to have by returning five of them
     whole (#4533). A page that does not fit at all is reported by name rather
     than silently missing.
+
+    ``tag_scope`` is the caller's forced tag scope: a page outside it reads as missing,
+    even when the model asks for it by id.
     """
     from ..memory_engine import fq_table
 
@@ -339,7 +346,7 @@ async def tool_read_mental_models(
     spent = 0
     for wanted in mental_model_ids:
         row = by_id.get(str(wanted))
-        if row is None:
+        if row is None or (tag_scope and not tags_satisfy_groups(row["tags"], tag_scope)):
             omitted.append(str(wanted))
             continue
         content = row["content"] or ""
@@ -665,7 +672,7 @@ async def tool_expand(
                 "id": str(memory["id"]),
                 "text": memory["text"],
                 "type": memory["fact_type"],
-                "context": memory["context"],
+                "context": truncate_context_for_prompt(memory["context"]),
             },
         }
 

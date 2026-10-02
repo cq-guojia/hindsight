@@ -50,7 +50,7 @@ from ...extensions.base import Extension
 # rather than `str` so a store implementing this seam is checked against the modes that
 # actually exist -- the SQL builders below take this exact type, and a bare `str` made
 # every hop between them unverifiable.
-from ..search.tags import TagsMatch, tag_filter_active
+from ..search.tags import TagGroup, TagsMatch, tag_filter_active
 from ..search.types import RetrievalResult
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -456,6 +456,11 @@ class RetainDocumentPart:
     #: Entity NAMES per unit_id, unresolved. A store that owns an entity registry resolves them
     #: itself; one that does not resolves them before calling.
     entity_names: dict[str, list[str]] = field(default_factory=dict)
+    #: The subset of ``entity_names`` per unit_id the caller opted out of resolution
+    #: (``resolve_entities=False``). A store that resolves names itself must match these on the
+    #: name alone (case-insensitive) and mint a new entity otherwise — never fuzzy-merge them onto
+    #: a similar name, which is how "Alice Smyth" ended up as "Alice Smith" (#5050).
+    exact_entity_names: dict[str, list[str]] = field(default_factory=dict)
     #: What this part replaces, if anything: `None` replaces nothing, an empty list replaces the
     #: WHOLE document, and a non-empty list names the chunk ids whose facts go. Only the first part
     #: of a document may carry it — a later one would tombstone its own siblings.
@@ -1068,6 +1073,18 @@ class MemoriesExtension(Extension, ABC):
         attribute."""
         return self.store_owned
 
+    def backend_name_for(self, bank_id: str) -> str:
+        """Which store serves this bank, as the ``memories_backend`` metric label. Empty by default.
+
+        Empty means no label at all, so a deployment that never overrides this keeps exactly the
+        series it has today: adding a label to an existing series starts a new one and orphans its
+        history. A router whose banks live in different backends overrides this to name the store
+        it routes a bank to -- typically only the non-default one, leaving the default store's
+        series unlabelled and continuous. Per-backend latency otherwise needs the per-tenant label,
+        which is too high-cardinality to leave on. Must be a short, bounded name.
+        """
+        return ""
+
     async def put_documents(self, *, bank_id: str, documents: list[dict], expect_watermark: int | None = None) -> None:
         """Store (or replace) several documents in one call.
 
@@ -1207,6 +1224,7 @@ class MemoriesExtension(Extension, ABC):
         *,
         document_id: str | None = None,
         unit_entity_names: dict[str, list[str]] | None = None,
+        unit_exact_entity_names: dict[str, list[str]] | None = None,
         replace_document_id: str = "",
         replace_chunk_ids: list[str] | None = None,
         replace_keep_chunk_ids: list[str] | None = None,
@@ -1220,6 +1238,10 @@ class MemoriesExtension(Extension, ABC):
         Only a store advertising :attr:`store_owned` implements this; the orchestrator calls it
         exactly when :meth:`store_owned_for` is true, so the default never runs. It exists on
         the interface so a routing extension delegates it automatically (see RoutingMemories).
+
+        ``unit_exact_entity_names`` is the subset of ``unit_entity_names`` the caller opted out of
+        resolution (``resolve_entities=False``): match those on the name alone and mint otherwise,
+        never fuzzy-merge them. Only passed when non-empty.
 
         ``replace_chunk_ids`` narrows the replace to named chunks of the document — the DELTA case,
         where every chunk not named keeps its facts. Pass the chunks whose facts must go: the ones
@@ -1415,6 +1437,7 @@ class MemoriesExtension(Extension, ABC):
         search_query: "str | None" = None,
         tags: "list[str] | None" = None,
         tags_match: TagsMatch = "any_strict",
+        tag_groups: "list[TagGroup] | None" = None,
         time_field: str | None = None,
         start_date: "datetime | None" = None,
         end_date: "datetime | None" = None,
@@ -1819,8 +1842,11 @@ class MemoriesExtension(Extension, ABC):
         pattern: str | None = None,
         limit: int = 100,
         offset: int = 0,
+        tag_groups: "list[TagGroup] | None" = None,
     ) -> dict[str, Any]:
         """One page of a bank's tag histogram, filtered/sorted/paged by the store.
+
+        ``tag_groups`` (a caller's forced tag scope) limits the histogram to the memories it admits.
 
         Returns ``{"items": [{"tag", "count"}], "total", "limit", "offset"}``.
         ``pattern`` is a case-insensitive wildcard (``*``); ordering is count
@@ -2112,7 +2138,15 @@ class MemoriesExtension(Extension, ABC):
         raise NotImplementedError
 
     async def memories_timeseries(
-        self, *, conn, fq_table, bank_id: str, time_field: str, trunc: str, since: datetime
+        self,
+        *,
+        conn,
+        fq_table,
+        bank_id: str,
+        time_field: str,
+        trunc: str,
+        since: datetime,
+        tag_groups: "list[TagGroup] | None" = None,
     ) -> list[dict[str, Any]]:
         """``[{"bucket": datetime, "fact_type": str, "count": int}]`` since ``since``.
 
@@ -2124,7 +2158,14 @@ class MemoriesExtension(Extension, ABC):
         raise NotImplementedError
 
     async def observation_scope_counts(
-        self, *, conn, fq_table, bank_id: str, limit: int = 100, offset: int = 0
+        self,
+        *,
+        conn,
+        fq_table,
+        bank_id: str,
+        limit: int = 100,
+        offset: int = 0,
+        tag_groups: "list[TagGroup] | None" = None,
     ) -> dict[str, Any]:
         """One page of the observation scope histogram, paged by the store.
 
@@ -2160,6 +2201,7 @@ class MemoriesExtension(Extension, ABC):
         entity_id: str | None = None,
         tags: list[str] | None = None,
         tags_match: TagsMatch = "any",
+        tag_groups: "list[TagGroup] | None" = None,
         created_before: "datetime | None" = None,
         time_field: str | None = None,
         start_date: "datetime | None" = None,
@@ -2171,6 +2213,8 @@ class MemoriesExtension(Extension, ABC):
 
         ``total`` is the count matching the filters, not the page size, because
         the UI pages on it.
+
+        ``tag_groups`` (AND-ed with ``tags``) carries a caller's forced tag scope.
 
         ``time_field`` / ``start_date`` / ``end_date`` are one time window: the
         named axis filters AND orders, and memories with no value on it are left
@@ -2280,6 +2324,7 @@ class MemoriesExtension(Extension, ABC):
         entity_names: list[str] | None = None,
         embedding=None,
         current_fact_type: str | None = None,
+        exact_entity_names: bool = False,
     ) -> None:
         """Apply a curation field edit to a live memory.
 
@@ -2310,7 +2355,9 @@ class MemoriesExtension(Extension, ABC):
           (exactly as its :meth:`retain` does) and rewrites the memory's entity
           ids from the result, so a brand-new entity created by an edit lands in
           that registry. When it is not ``None`` it is the authoritative set and
-          ``entity_ids`` is ignored.
+          ``entity_ids`` is ignored. ``exact_entity_names`` set means the caller
+          opted out of resolution (``resolve_entities=False``): match the names
+          exactly and mint otherwise, never fuzzy-merge them.
         * ``entity_ids`` — the already-resolved set, for a store whose registry is
           the host's SQL (the host minted them and, for a join-table store, has
           already re-linked them, so it ignores this).
@@ -2359,6 +2406,7 @@ class MemoriesExtension(Extension, ABC):
         chunk_id: str | None = None,
         tags: list[str] | None = None,
         tags_match: TagsMatch = "all_strict",
+        tag_groups: "list[TagGroup] | None" = None,
         limit: int = 1000,
     ) -> dict[str, Any]:
         """Memory nodes for the graph view, plus the total matching count.
@@ -2388,6 +2436,7 @@ class MemoriesExtension(Extension, ABC):
         chunk_id: str | None = None,
         tags: list[str] | None = None,
         tags_match: TagsMatch = "all_strict",
+        tag_groups: "list[TagGroup] | None" = None,
         limit: int = 1000,
     ) -> dict[str, Any]:
         """Everything one graph render reads, in one pass:
@@ -2417,6 +2466,7 @@ class MemoriesExtension(Extension, ABC):
             chunk_id=chunk_id,
             tags=tags,
             tags_match=tags_match,
+            tag_groups=tag_groups,
             limit=limit,
         )
         units = page["units"]
@@ -2919,6 +2969,7 @@ class MemoriesExtension(Extension, ABC):
         search_query: str | None,
         tags: list[str] | None,
         tags_match: TagsMatch,
+        tag_groups: "list[TagGroup] | None",
         time_field: str | None,
         start_date: datetime | None,
         end_date: datetime | None,
@@ -2934,6 +2985,7 @@ class MemoriesExtension(Extension, ABC):
             search_query=search_query,
             tags=tags,
             tags_match=tags_match,
+            tag_groups=tag_groups,
             time_field=time_field,
             start_date=start_date,
             end_date=end_date,

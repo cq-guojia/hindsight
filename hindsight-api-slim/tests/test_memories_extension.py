@@ -146,6 +146,7 @@ class InMemoryMemories(MemoriesExtension):
         search_query=None,
         tags=None,
         tags_match="any_strict",
+        tag_groups=None,
         time_field=None,
         start_date=None,
         end_date=None,
@@ -162,6 +163,7 @@ class InMemoryMemories(MemoriesExtension):
         facts,
         document_id=None,
         unit_entity_names=None,
+        unit_exact_entity_names=None,
         replace_document_id="",
         replace_chunk_ids=None,
         replace_keep_chunk_ids=None,
@@ -345,7 +347,7 @@ class InMemoryMemories(MemoriesExtension):
             counts[row.fact_type] = counts.get(row.fact_type, 0) + 1
         return counts
 
-    async def list_tags(self, *, conn, fq_table, bank_id, pattern=None, limit=100, offset=0):
+    async def list_tags(self, *, conn, fq_table, bank_id, pattern=None, limit=100, offset=0, tag_groups=None):
         self.calls.append("list_tags")
         counts: dict[str, int] = {}
         for row in self.rows.values():
@@ -528,6 +530,18 @@ class InMemoryMemories(MemoriesExtension):
         self.calls.append("list_entities")
         return {"items": [], "total": 0, "limit": limit, "offset": offset}
 
+    async def entity_graph(
+        self, *, conn, fq_table, bank_id, limit, min_count, tags=None, tags_match="any", tag_groups=None
+    ):
+        self.calls.append("entity_graph")
+        return {"nodes": [], "edges": [], "total_entities": 0, "total_edges": 0, "limit": limit}
+
+    async def get_entity_detail(
+        self, *, conn, fq_table, bank_id, entity_id, tags=None, tags_match="any", tag_groups=None
+    ):
+        self.calls.append("get_entity_detail")
+        return None
+
     async def graph_units(self, *, conn, fq_table, bank_id, limit=1000, **kwargs):
         rows = list(self.rows.values())[:limit]
         return {"units": [{"id": r.unit_id, "fact_type": r.fact_type} for r in rows], "total": len(self.rows)}
@@ -606,8 +620,11 @@ class InMemoryMemories(MemoriesExtension):
         entity_names=None,
         embedding=None,
         current_fact_type=None,
+        exact_entity_names=False,
     ):
         self.calls.append("apply_edit")
+        self.edit_entity_names = entity_names
+        self.edit_exact_entity_names = exact_entity_names
         self.edit_embedding = embedding
         self.edit_current_fact_type = current_fact_type
         row = self.rows.get(str(unit_id))
@@ -729,11 +746,11 @@ class InMemoryMemories(MemoriesExtension):
         # A store that carries links inline has no join table to tally.
         return {"temporal": 0, "semantic": 0, "causal": 0}
 
-    async def memories_timeseries(self, *, conn, fq_table, bank_id, time_field, trunc, since):
+    async def memories_timeseries(self, *, conn, fq_table, bank_id, time_field, trunc, since, tag_groups=None):
         self.calls.append("memories_timeseries")
         return []
 
-    async def observation_scope_counts(self, *, conn, fq_table, bank_id, limit=100, offset=0):
+    async def observation_scope_counts(self, *, conn, fq_table, bank_id, limit=100, offset=0, tag_groups=None):
         self.calls.append("observation_scope_counts")
         # Same paged shape as list_tags above: the histogram is the store's to group,
         # order and page, so the stub does it over its own rows rather than shipping
@@ -1332,6 +1349,24 @@ async def test_apply_edit_is_told_the_pre_edit_fact_type(memory, request_context
     await memory.update_memory_unit("seam-bank", unit_ids[0], text="after the edit", request_context=request_context)
 
     assert store.edit_current_fact_type == "world"
+
+
+async def test_an_edit_that_opts_out_of_resolution_tells_the_store(memory, request_context, restore_default_store):
+    """`resolve_entities=False` on an edit reaches a store that resolves names itself (#5050).
+
+    It got the names alone and fuzzy-resolved them, so a caller correcting "Alice Smith" to
+    "Alice Smyth" could land right back on "Alice Smith"."""
+    store = InMemoryMemories({})
+    set_memories(store)
+    unit_ids = await _seed(store, "seam-bank", text="before the edit", fact_type="world")
+
+    await memory.update_memory_unit(
+        "seam-bank", unit_ids[0], entities=["Alice Smyth"], resolve_entities=False, request_context=request_context
+    )
+    assert (store.edit_entity_names, store.edit_exact_entity_names) == (["Alice Smyth"], True)
+
+    await memory.update_memory_unit("seam-bank", unit_ids[0], entities=["Alice Smyth"], request_context=request_context)
+    assert (store.edit_entity_names, store.edit_exact_entity_names) == (["Alice Smyth"], False)
 
 
 async def test_engine_list_entities_routes_through_store(memory, request_context, restore_default_store):
@@ -2156,7 +2191,7 @@ async def test_import_writes_a_document_to_the_store_and_nothing_to_postgres(res
     carried `created_at` on the stray document row, and the legacy edges into `memory_links`.
     ``backend=None`` makes any of those fail.
     """
-    from hindsight_api.engine.transfer.importer import _import_one_document
+    from hindsight_api.engine.transfer.importer import _import_document_batch, _prepare_documents
     from hindsight_api.engine.transfer.schema import (
         TransferCausalRelation,
         TransferChunk,
@@ -2192,15 +2227,12 @@ async def test_import_writes_a_document_to_the_store_and_nothing_to_postgres(res
     class _Config:
         store_document_text = True
 
-    batch = await _import_one_document(
+    [batch] = await _import_document_batch(
         backend=None,
-        embeddings_model=_Embedder(),
         entity_resolver=None,
         config=_Config(),
-        format_date_fn=str,
         bank_id="bank-x",
-        document=document,
-        target_id="doc-1",
+        prepared=await _prepare_documents(_Embedder(), str, [(document, "doc-1")]),
         ops=None,
     )
 
@@ -2220,7 +2252,7 @@ async def test_a_store_gets_the_same_entity_names_the_sql_resolver_would_keep(re
     """The SQL resolver drops a blank or oversized name and collapses whitespace before it writes
     (#3275); a store that resolves names itself was handed the raw extraction, so an encoded blob
     became a registry entity there."""
-    from hindsight_api.engine.transfer.importer import _import_one_document
+    from hindsight_api.engine.transfer.importer import _import_document_batch, _prepare_documents
     from hindsight_api.engine.transfer.schema import TransferChunk, TransferDocument, TransferFact
 
     store = InMemoryMemories({})
@@ -2244,15 +2276,12 @@ async def test_a_store_gets_the_same_entity_names_the_sql_resolver_would_keep(re
     class _Config:
         store_document_text = True
 
-    batch = await _import_one_document(
+    [batch] = await _import_document_batch(
         backend=None,
-        embeddings_model=_Embedder(),
         entity_resolver=None,
         config=_Config(),
-        format_date_fn=str,
         bank_id="bank-x",
-        document=document,
-        target_id="doc-1",
+        prepared=await _prepare_documents(_Embedder(), str, [(document, "doc-1")]),
         ops=None,
     )
 
